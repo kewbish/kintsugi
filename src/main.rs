@@ -1,132 +1,159 @@
-use std::collections::HashMap;
-
-use argon2::Argon2;
-use opaque_ke::{
-    ciphersuite::CipherSuite, ClientRegistration, ClientRegistrationFinishParameters,
-    RegistrationRequest, RegistrationResponse, RegistrationUpload, ServerRegistration, ServerSetup,
+use chacha20poly1305::{
+    aead::{generic_array::GenericArray, Aead, AeadCore, KeyInit},
+    consts::U12,
+    ChaCha20Poly1305, Key, Nonce,
 };
+use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
+use rand::RngCore;
+use std::collections::HashMap;
+use voprf::{
+    BlindedElement, EvaluationElement, OprfClient, OprfClientBlindResult, OprfServer, Ristretto255,
+};
 
-#[allow(dead_code)]
-struct DefaultCipherSuite;
+type CS = voprf::Ristretto255;
 
-impl CipherSuite for DefaultCipherSuite {
-    type OprfCs = opaque_ke::Ristretto255;
-    type KeGroup = opaque_ke::Ristretto255;
-    type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
-
-    type Ksf = Argon2<'static>;
+type PublicKey = [u8; 32];
+type PrivateKey = [u8; 32];
+struct Keypair {
+    private_key: PrivateKey,
+    public_key: PublicKey,
 }
 
-struct PeerDatabaseEntry {
-    password_bytes: String,
-}
-
-struct LocalDatabaseEntry {
-    client_registration: ClientRegistration<DefaultCipherSuite>,
+impl Keypair {
+    fn new() -> Self {
+        let private_key = Scalar::random(&mut OsRng);
+        let public_key = RistrettoPoint::default() * private_key;
+        Keypair {
+            private_key: private_key.to_bytes(),
+            public_key: public_key.compress().to_bytes(),
+        }
+    }
 }
 
 struct P2POpaqueNode {
     id: String,
-    local_db: HashMap<String, LocalDatabaseEntry>,
-    peer_db: HashMap<String, PeerDatabaseEntry>,
+    keypair: Keypair,
+    envelopes: HashMap<String, EncryptedEnvelope>,
+    oprf_client: Option<OprfClient<CS>>,
 }
 
 impl P2POpaqueNode {
     fn new(id: String) -> Self {
         P2POpaqueNode {
             id,
-            local_db: HashMap::new(),
-            peer_db: HashMap::new(),
+            keypair: Keypair::new(),
+            envelopes: HashMap::new(),
+            oprf_client: None,
         }
     }
-    fn local_registration_start(
-        &mut self,
-        peer_id: String,
-        password: String,
-    ) -> RegistrationRequest<DefaultCipherSuite> {
+}
+
+struct RegStartRequest {
+    blinded_pwd: BlindedElement<CS>,
+}
+
+impl P2POpaqueNode {
+    fn local_registration_start(&mut self, password: String) -> RegStartRequest {
         let mut rng = OsRng;
-        let client_registration_start_result =
-            ClientRegistration::<DefaultCipherSuite>::start(&mut rng, password.as_bytes());
-        if let Ok(crsr) = client_registration_start_result {
-            self.local_db.insert(
-                peer_id,
-                LocalDatabaseEntry {
-                    client_registration: crsr.state,
-                },
-            );
-            return crsr.message;
-        } else {
-            panic!("Local registration start failed.")
+        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng)
+            .expect("OPRF client blinding failed for local registration start");
+        self.oprf_client = Some(password_blind_result.state);
+        RegStartRequest {
+            blinded_pwd: password_blind_result.message,
         }
     }
-    fn peer_registration_start(
-        &mut self,
-        peer_id: String,
-        peer_reg_start_message: RegistrationRequest<DefaultCipherSuite>,
-    ) -> RegistrationResponse<DefaultCipherSuite> {
-        let mut rng = OsRng;
-        let local_setup = ServerSetup::<DefaultCipherSuite>::new(&mut rng);
-        let server_registration_start_result = ServerRegistration::<DefaultCipherSuite>::start(
-            &local_setup,
-            peer_reg_start_message,
-            peer_id.as_bytes(),
-        );
-        if let Ok(srsr) = server_registration_start_result {
-            self.peer_db.insert(
-                peer_id,
-                PeerDatabaseEntry {
-                    password_bytes: String::new(),
-                },
-            );
-            return srsr.message;
-        } else {
-            panic!("Peer registration start failed")
+}
+
+struct RegStartResponse {
+    rwd: EvaluationElement<CS>,
+    peer_public_key: PublicKey,
+    peer_id: String,
+}
+
+impl P2POpaqueNode {
+    fn peer_registration_start(self, peer_req: RegStartRequest) -> RegStartResponse {
+        let server = OprfServer::<CS>::new_with_key(&self.keypair.private_key)
+            .expect("OPRF server creation failed for peer registration start");
+        let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
+        RegStartResponse {
+            rwd: password_blind_eval,
+            peer_public_key: self.keypair.public_key,
+            peer_id: self.id,
         }
     }
+}
+
+struct RegFinishRequest {
+    public_key: PublicKey,
+    peer_id: String,
+    encrypted_envelope: Vec<u8>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Envelope {
+    public_key: PublicKey,
+    private_key: PublicKey,
+    peer_public_key: PublicKey,
+    peer_id: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EncryptedEnvelope {
+    public_key: PublicKey,
+    encrypted_envelope: Vec<u8>,
+}
+
+impl P2POpaqueNode {
     fn local_registration_finish(
         &mut self,
-        peer_id: String,
         password: String,
-        peer_reg_start_message: RegistrationResponse<DefaultCipherSuite>,
-    ) -> RegistrationUpload<DefaultCipherSuite> {
-        let client_registration_state = self.local_db.remove(&peer_id);
-        if let None = client_registration_state {
-            panic!("Could not retrieve local registration start state")
+        peer_resp: RegStartResponse,
+    ) -> RegFinishRequest {
+        if let None = self.oprf_client {
+            panic!("OPRF client not initialized during local registration finish")
         }
-        let mut rng = OsRng;
-        let client_registration = client_registration_state.unwrap().client_registration;
-        let client_registration_finish_result = client_registration.finish(
-            &mut rng,
-            password.as_bytes(),
-            peer_reg_start_message,
-            ClientRegistrationFinishParameters::default(),
+        let oprf_client = self.oprf_client.as_ref().unwrap();
+        let unblinded_rwd = oprf_client
+            .finalize(&password.as_bytes(), &peer_resp.rwd)
+            .expect("Unblinding failed for local registration finish");
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(unblinded_rwd.as_slice()));
+        let identity_keypair = Keypair::new();
+        let nonce_bytes = [0u8; 12];
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let envelope = Envelope {
+            public_key: identity_keypair.public_key,
+            private_key: identity_keypair.private_key,
+            peer_public_key: peer_resp.peer_public_key,
+            peer_id: peer_resp.peer_id,
+        };
+        let plaintext = serde_json::to_string(&envelope)
+            .expect("JSON serialization of envelope failed in local registration finish");
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_bytes())
+            .expect("Encryption of envelope failed in local registration finish");
+        RegFinishRequest {
+            peer_id: self.id.clone(),
+            public_key: self.keypair.public_key,
+            encrypted_envelope: ciphertext,
+        }
+    }
+}
+
+impl P2POpaqueNode {
+    fn peer_registration_finish(&mut self, peer_req: RegFinishRequest) {
+        self.envelopes.insert(
+            peer_req.peer_id,
+            EncryptedEnvelope {
+                public_key: peer_req.public_key,
+                encrypted_envelope: peer_req.encrypted_envelope,
+            },
         );
-        if let Ok(crfr) = client_registration_finish_result {
-            return crfr.message;
-        } else {
-            panic!("Local registration finish failed")
-        }
     }
-    fn peer_registration_finish(
-        &mut self,
-        peer_id: String,
-        peer_reg_finish_message: RegistrationUpload<DefaultCipherSuite>,
-    ) {
-        let peer_id_envelope =
-            ServerRegistration::<DefaultCipherSuite>::finish(peer_reg_finish_message);
-        let serialized_peer_id_envelope = serde_json::to_string(&peer_id_envelope.serialize());
-        if let Ok(spie) = serialized_peer_id_envelope {
-            self.peer_db.insert(
-                peer_id,
-                PeerDatabaseEntry {
-                    password_bytes: spie,
-                },
-            );
-        } else {
-            panic!("Serializing peer registration finish envelope failed")
-        }
-    }
+}
+
+impl P2POpaqueNode {
     fn local_login_start() {}
     fn peer_login_start() {}
     fn local_login_finish() {}
