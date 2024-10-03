@@ -16,6 +16,8 @@ type CS = voprf::Ristretto255;
 
 type PublicKey = [u8; 32];
 type PrivateKey = [u8; 32];
+
+#[derive(Clone)]
 struct Keypair {
     private_key: PrivateKey,
     public_key: PublicKey,
@@ -35,6 +37,7 @@ impl Keypair {
 struct P2POpaqueNode {
     id: String,
     keypair: Keypair,
+    peer_opaque_keys: HashMap<String, Keypair>,
     envelopes: HashMap<String, EncryptedEnvelope>,
     oprf_client: Option<OprfClient<CS>>,
 }
@@ -44,6 +47,7 @@ impl P2POpaqueNode {
         P2POpaqueNode {
             id,
             keypair: Keypair::new(),
+            peer_opaque_keys: HashMap::new(),
             envelopes: HashMap::new(),
             oprf_client: None,
         }
@@ -52,6 +56,7 @@ impl P2POpaqueNode {
 
 struct RegStartRequest {
     blinded_pwd: BlindedElement<CS>,
+    peer_id: String,
 }
 
 impl P2POpaqueNode {
@@ -62,6 +67,7 @@ impl P2POpaqueNode {
         self.oprf_client = Some(password_blind_result.state);
         RegStartRequest {
             blinded_pwd: password_blind_result.message,
+            peer_id: self.id.clone(),
         }
     }
 }
@@ -73,14 +79,17 @@ struct RegStartResponse {
 }
 
 impl P2POpaqueNode {
-    fn peer_registration_start(self, peer_req: RegStartRequest) -> RegStartResponse {
-        let server = OprfServer::<CS>::new_with_key(&self.keypair.private_key)
+    fn peer_registration_start(&mut self, peer_req: RegStartRequest) -> RegStartResponse {
+        let opaque_keypair = Keypair::new();
+        self.peer_opaque_keys
+            .insert(peer_req.peer_id, opaque_keypair.clone());
+        let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key)
             .expect("OPRF server creation failed for peer registration start");
         let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
         RegStartResponse {
             rwd: password_blind_eval,
             peer_public_key: self.keypair.public_key,
-            peer_id: self.id,
+            peer_id: self.id.clone(),
         }
     }
 }
