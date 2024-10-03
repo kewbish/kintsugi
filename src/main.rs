@@ -7,6 +7,7 @@ use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 use voprf::{
     BlindedElement, EvaluationElement, OprfClient, OprfClientBlindResult, OprfServer, Ristretto255,
@@ -34,7 +35,8 @@ impl Keypair {
     }
 }
 
-struct P2POpaqueNode {
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct P2POpaqueNode {
     id: String,
     keypair: Keypair,
     peer_opaque_keys: HashMap<String, Keypair>,
@@ -54,6 +56,7 @@ impl P2POpaqueNode {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct RegStartRequest {
     blinded_pwd: BlindedElement<CS>,
     peer_id: String,
@@ -72,6 +75,7 @@ impl P2POpaqueNode {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct RegStartResponse {
     rwd: EvaluationElement<CS>,
     peer_public_key: PublicKey,
@@ -94,6 +98,7 @@ impl P2POpaqueNode {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct RegFinishRequest {
     public_key: PublicKey,
     peer_id: String,
@@ -126,12 +131,15 @@ impl P2POpaqueNode {
         let unblinded_rwd = oprf_client
             .finalize(&password.as_bytes(), &peer_resp.rwd)
             .expect("Unblinding failed for local registration finish");
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(unblinded_rwd.as_slice()));
-        let identity_keypair = Keypair::new();
+        println!("UNBL {:?}", unblinded_rwd);
+        let mut hasher = Sha3_256::new();
+        hasher.update(unblinded_rwd.as_slice());
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
         let envelope = Envelope {
-            keypair: identity_keypair,
+            keypair: self.keypair.clone(),
             peer_public_key: peer_resp.peer_public_key,
             peer_id: peer_resp.peer_id,
         };
@@ -160,6 +168,7 @@ impl P2POpaqueNode {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct LoginStartRequest {
     blinded_pwd: BlindedElement<CS>,
     peer_id: String,
@@ -178,6 +187,7 @@ impl P2POpaqueNode {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct LoginStartResponse {
     rwd: EvaluationElement<CS>,
     envelope: EncryptedEnvelope,
@@ -196,7 +206,7 @@ impl P2POpaqueNode {
             panic!("Could not find envelope for peer login start")
         }
         let server = OprfServer::<CS>::new_with_key(&local_opaque_keypair.unwrap().private_key)
-            .expect("OPRF server creation failed for peer registration start");
+            .expect("OPRF server creation failed for peer login start");
         let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
         LoginStartResponse {
             rwd: password_blind_eval,
@@ -209,11 +219,18 @@ impl P2POpaqueNode {
 
 impl P2POpaqueNode {
     fn local_login_finish(&self, password: String, peer_resp: LoginStartResponse) -> Keypair {
+        if let None = self.oprf_client {
+            panic!("OPRF client not initialized during local registration finish")
+        }
         let oprf_client = self.oprf_client.as_ref().unwrap();
         let unblinded_rwd = oprf_client
             .finalize(&password.as_bytes(), &peer_resp.rwd)
             .expect("Unblinding failed for local login finish");
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(unblinded_rwd.as_slice()));
+        println!("UNBL2 {:?}", unblinded_rwd);
+        let mut hasher = Sha3_256::new();
+        hasher.update(unblinded_rwd.as_slice());
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext_bytes = cipher
@@ -223,6 +240,107 @@ impl P2POpaqueNode {
             .expect("Deserialization failed for local login finish");
         plaintext.keypair
     }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_happy_path() {
+        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
+        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
+
+        let reg_start_req = node_1.local_registration_start("password".to_string());
+        assert_eq!(reg_start_req.peer_id, "Alice".to_string());
+
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
+        assert_eq!(reg_start_resp.peer_public_key, node_1.keypair.public_key);
+
+        let reg_finish_req =
+            node_1.local_registration_finish("password".to_string(), reg_start_resp);
+        assert_eq!(reg_finish_req.public_key, node_2.keypair.public_key);
+
+        node_2.peer_registration_finish(reg_finish_req);
+        assert!(node_2.peer_opaque_keys.contains_key("Alice"));
+        assert!(node_2.envelopes.contains_key("Alice"));
+
+        let login_start_req = node_1.local_login_start("password".to_string());
+        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+
+        let login_start_resp = node_2.peer_login_start(login_start_req);
+        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+
+        let keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
+        assert_eq!(keypair.public_key, node_1.keypair.public_key);
+        assert_eq!(keypair.private_key, node_1.keypair.private_key);
+    }
+
+    #[test]
+    fn test_wrong_password() {
+        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
+        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
+
+        let reg_start_req = node_1.local_registration_start("password".to_string());
+        assert_eq!(reg_start_req.peer_id, "Alice".to_string());
+
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
+        assert_eq!(reg_start_resp.peer_public_key, node_1.keypair.public_key);
+
+        let reg_finish_req =
+            node_1.local_registration_finish("password".to_string(), reg_start_resp);
+        assert_eq!(reg_finish_req.public_key, node_2.keypair.public_key);
+
+        node_2.peer_registration_finish(reg_finish_req);
+        assert!(node_2.peer_opaque_keys.contains_key("Alice"));
+        assert!(node_2.envelopes.contains_key("Alice"));
+
+        // wrong password during start, corrected later
+
+        let login_start_req = node_1.local_login_start("password2".to_string());
+        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+
+        let login_start_resp = node_2.peer_login_start(login_start_req);
+        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+
+        let panics = std::panic::catch_unwind(|| {
+            node_1.local_login_finish("password".to_string(), login_start_resp)
+        });
+        assert!(panics.is_err());
+
+        // wrong password during finish
+
+        let login_start_req = node_1.local_login_start("password".to_string());
+        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+
+        let login_start_resp = node_2.peer_login_start(login_start_req);
+        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+
+        let panics = std::panic::catch_unwind(|| {
+            node_1.local_login_finish("password2".to_string(), login_start_resp)
+        });
+        assert!(panics.is_err());
+
+        // two diff wrong passwords during finish
+
+        let login_start_req = node_1.local_login_start("password2".to_string());
+        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+
+        let login_start_resp = node_2.peer_login_start(login_start_req);
+        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+
+        let panics = std::panic::catch_unwind(|| {
+            node_1.local_login_finish("password3".to_string(), login_start_resp)
+        });
+        assert!(panics.is_err());
+    }
+
+    /*
+     * TODO:
+     * - serializing and deserializing each struct
+     * - message modification
+     * - injecting messages into another exchange
+     */
 }
 
 fn main() {}
