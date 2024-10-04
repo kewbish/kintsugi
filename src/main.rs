@@ -1,17 +1,14 @@
+#[allow(unused_imports)]
 use chacha20poly1305::{
-    aead::{generic_array::GenericArray, Aead, AeadCore, KeyInit},
-    consts::U12,
+    aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
-use rand::RngCore;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
-use voprf::{
-    BlindedElement, EvaluationElement, OprfClient, OprfClientBlindResult, OprfServer, Ristretto255,
-};
+use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
 
 type CS = voprf::Ristretto255;
 
@@ -335,9 +332,81 @@ mod test {
         assert!(panics.is_err());
     }
 
+    #[test]
+    fn test_serde_req_resps() {
+        fn simulate_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(message: T) -> T {
+            let serialized =
+                serde_json::to_string(&message).expect("JSON serialization of message failed");
+            let deserialized =
+                serde_json::from_str(&serialized).expect("JSON deserialization of message failed");
+            deserialized
+        }
+
+        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
+        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
+
+        let mut reg_start_req = node_1.local_registration_start("password".to_string());
+        reg_start_req = simulate_serde(reg_start_req);
+
+        let mut reg_start_resp = node_2.peer_registration_start(reg_start_req);
+        reg_start_resp = simulate_serde(reg_start_resp);
+
+        let mut reg_finish_req =
+            node_1.local_registration_finish("password".to_string(), reg_start_resp);
+        reg_finish_req = simulate_serde(reg_finish_req);
+
+        node_2.peer_registration_finish(reg_finish_req);
+
+        let mut login_start_req = node_1.local_login_start("password".to_string());
+        login_start_req = simulate_serde(login_start_req);
+
+        let mut login_start_resp = node_2.peer_login_start(login_start_req);
+        login_start_resp = simulate_serde(login_start_resp);
+
+        let mut keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
+        keypair = simulate_serde(keypair);
+        assert_eq!(keypair.public_key, node_1.keypair.public_key);
+        assert_eq!(keypair.private_key, node_1.keypair.private_key);
+    }
+
+    #[test]
+    fn test_serde_node() {
+        fn simulate_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(node: T) -> T {
+            let serialized =
+                serde_json::to_string(&node).expect("JSON serialization of message failed");
+            let deserialized =
+                serde_json::from_str(&serialized).expect("JSON deserialization of message failed");
+            deserialized
+        }
+
+        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
+        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
+
+        let reg_start_req = node_1.local_registration_start("password".to_string());
+
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
+
+        node_1 = simulate_serde(node_1);
+        let reg_finish_req =
+            node_1.local_registration_finish("password".to_string(), reg_start_resp);
+
+        node_2 = simulate_serde(node_2);
+        node_2.peer_registration_finish(reg_finish_req);
+
+        node_1 = simulate_serde(node_1);
+        let login_start_req = node_1.local_login_start("password".to_string());
+
+        node_2 = simulate_serde(node_2);
+        let login_start_resp = node_2.peer_login_start(login_start_req);
+
+        node_1 = simulate_serde(node_1);
+        let keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
+        assert_eq!(keypair.public_key, node_1.keypair.public_key);
+        assert_eq!(keypair.private_key, node_1.keypair.private_key);
+    }
+
     /*
      * TODO:
-     * - serializing and deserializing each struct
      * - message modification
      * - injecting messages into another exchange
      */
