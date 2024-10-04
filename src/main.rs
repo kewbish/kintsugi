@@ -128,7 +128,6 @@ impl P2POpaqueNode {
         let unblinded_rwd = oprf_client
             .finalize(&password.as_bytes(), &peer_resp.rwd)
             .expect("Unblinding failed for local registration finish");
-        println!("UNBL {:?}", unblinded_rwd);
         let mut hasher = Sha3_256::new();
         hasher.update(unblinded_rwd.as_slice());
         let key = hasher.finalize();
@@ -223,7 +222,6 @@ impl P2POpaqueNode {
         let unblinded_rwd = oprf_client
             .finalize(&password.as_bytes(), &peer_resp.rwd)
             .expect("Unblinding failed for local login finish");
-        println!("UNBL2 {:?}", unblinded_rwd);
         let mut hasher = Sha3_256::new();
         hasher.update(unblinded_rwd.as_slice());
         let key = hasher.finalize();
@@ -240,176 +238,7 @@ impl P2POpaqueNode {
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_happy_path() {
-        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
-        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
-
-        let reg_start_req = node_1.local_registration_start("password".to_string());
-        assert_eq!(reg_start_req.peer_id, "Alice".to_string());
-
-        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
-        assert_eq!(reg_start_resp.peer_public_key, node_1.keypair.public_key);
-
-        let reg_finish_req =
-            node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        assert_eq!(reg_finish_req.public_key, node_2.keypair.public_key);
-
-        node_2.peer_registration_finish(reg_finish_req);
-        assert!(node_2.peer_opaque_keys.contains_key("Alice"));
-        assert!(node_2.envelopes.contains_key("Alice"));
-
-        let login_start_req = node_1.local_login_start("password".to_string());
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
-
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
-
-        let keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
-        assert_eq!(keypair.public_key, node_1.keypair.public_key);
-        assert_eq!(keypair.private_key, node_1.keypair.private_key);
-    }
-
-    #[test]
-    fn test_wrong_password() {
-        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
-        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
-
-        let reg_start_req = node_1.local_registration_start("password".to_string());
-        assert_eq!(reg_start_req.peer_id, "Alice".to_string());
-
-        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
-        assert_eq!(reg_start_resp.peer_public_key, node_1.keypair.public_key);
-
-        let reg_finish_req =
-            node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        assert_eq!(reg_finish_req.public_key, node_2.keypair.public_key);
-
-        node_2.peer_registration_finish(reg_finish_req);
-        assert!(node_2.peer_opaque_keys.contains_key("Alice"));
-        assert!(node_2.envelopes.contains_key("Alice"));
-
-        // wrong password during start, corrected later
-
-        let login_start_req = node_1.local_login_start("password2".to_string());
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
-
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
-
-        let panics = std::panic::catch_unwind(|| {
-            node_1.local_login_finish("password".to_string(), login_start_resp)
-        });
-        assert!(panics.is_err());
-
-        // wrong password during finish
-
-        let login_start_req = node_1.local_login_start("password".to_string());
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
-
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
-
-        let panics = std::panic::catch_unwind(|| {
-            node_1.local_login_finish("password2".to_string(), login_start_resp)
-        });
-        assert!(panics.is_err());
-
-        // two diff wrong passwords during finish
-
-        let login_start_req = node_1.local_login_start("password2".to_string());
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
-
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
-
-        let panics = std::panic::catch_unwind(|| {
-            node_1.local_login_finish("password3".to_string(), login_start_resp)
-        });
-        assert!(panics.is_err());
-    }
-
-    #[test]
-    fn test_serde_req_resps() {
-        fn simulate_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(message: T) -> T {
-            let serialized =
-                serde_json::to_string(&message).expect("JSON serialization of message failed");
-            let deserialized =
-                serde_json::from_str(&serialized).expect("JSON deserialization of message failed");
-            deserialized
-        }
-
-        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
-        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
-
-        let mut reg_start_req = node_1.local_registration_start("password".to_string());
-        reg_start_req = simulate_serde(reg_start_req);
-
-        let mut reg_start_resp = node_2.peer_registration_start(reg_start_req);
-        reg_start_resp = simulate_serde(reg_start_resp);
-
-        let mut reg_finish_req =
-            node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        reg_finish_req = simulate_serde(reg_finish_req);
-
-        node_2.peer_registration_finish(reg_finish_req);
-
-        let mut login_start_req = node_1.local_login_start("password".to_string());
-        login_start_req = simulate_serde(login_start_req);
-
-        let mut login_start_resp = node_2.peer_login_start(login_start_req);
-        login_start_resp = simulate_serde(login_start_resp);
-
-        let mut keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
-        keypair = simulate_serde(keypair);
-        assert_eq!(keypair.public_key, node_1.keypair.public_key);
-        assert_eq!(keypair.private_key, node_1.keypair.private_key);
-    }
-
-    #[test]
-    fn test_serde_node() {
-        fn simulate_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(node: T) -> T {
-            let serialized =
-                serde_json::to_string(&node).expect("JSON serialization of message failed");
-            let deserialized =
-                serde_json::from_str(&serialized).expect("JSON deserialization of message failed");
-            deserialized
-        }
-
-        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
-        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
-
-        let reg_start_req = node_1.local_registration_start("password".to_string());
-
-        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
-
-        node_1 = simulate_serde(node_1);
-        let reg_finish_req =
-            node_1.local_registration_finish("password".to_string(), reg_start_resp);
-
-        node_2 = simulate_serde(node_2);
-        node_2.peer_registration_finish(reg_finish_req);
-
-        node_1 = simulate_serde(node_1);
-        let login_start_req = node_1.local_login_start("password".to_string());
-
-        node_2 = simulate_serde(node_2);
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-
-        node_1 = simulate_serde(node_1);
-        let keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
-        assert_eq!(keypair.public_key, node_1.keypair.public_key);
-        assert_eq!(keypair.private_key, node_1.keypair.private_key);
-    }
-
-    /*
-     * TODO:
-     * - message modification
-     * - injecting messages into another exchange
-     */
-}
+#[path = "main_tests.rs"]
+mod test;
 
 fn main() {}
