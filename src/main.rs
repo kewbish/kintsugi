@@ -5,6 +5,7 @@ use chacha20poly1305::{
 };
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha3::{Digest, Sha3_256};
@@ -38,6 +39,7 @@ pub struct P2POpaqueNode {
     id: String,
     keypair: Keypair,
     peer_opaque_keys: HashMap<String, Keypair>,
+    attempted_peer_public_keys: HashMap<String, PublicKey>,
     envelopes: HashMap<String, EncryptedEnvelope>,
     oprf_client: Option<OprfClient<CS>>,
 }
@@ -48,6 +50,7 @@ impl P2POpaqueNode {
             id,
             keypair: Keypair::new(),
             peer_opaque_keys: HashMap::new(),
+            attempted_peer_public_keys: HashMap::new(),
             envelopes: HashMap::new(),
             oprf_client: None,
         }
@@ -57,6 +60,7 @@ impl P2POpaqueNode {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct RegStartRequest {
     blinded_pwd: BlindedElement<CS>,
+    peer_public_key: PublicKey,
     peer_id: String,
 }
 
@@ -68,6 +72,7 @@ impl P2POpaqueNode {
         self.oprf_client = Some(password_blind_result.state);
         RegStartRequest {
             blinded_pwd: password_blind_result.message,
+            peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
         }
     }
@@ -84,10 +89,12 @@ impl P2POpaqueNode {
     fn peer_registration_start(&mut self, peer_req: RegStartRequest) -> RegStartResponse {
         let opaque_keypair = Keypair::new();
         self.peer_opaque_keys
-            .insert(peer_req.peer_id, opaque_keypair.clone());
+            .insert(peer_req.peer_id.clone(), opaque_keypair.clone());
         let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key)
             .expect("OPRF server creation failed for peer registration start");
         let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
+        self.attempted_peer_public_keys
+            .insert(peer_req.peer_id, peer_req.peer_public_key);
         RegStartResponse {
             rwd: password_blind_eval,
             peer_public_key: self.keypair.public_key,
@@ -101,6 +108,7 @@ struct RegFinishRequest {
     public_key: PublicKey,
     peer_id: String,
     nonce: [u8; 12],
+    signature: Signature,
     encrypted_envelope: Vec<u8>,
 }
 
@@ -148,10 +156,17 @@ impl P2POpaqueNode {
         let ciphertext = cipher
             .encrypt(nonce, plaintext.as_bytes())
             .expect("Encryption of envelope failed in local registration finish");
+        let mut keypair_bytes = [0u8; 64];
+        keypair_bytes[..32].copy_from_slice(&self.keypair.public_key);
+        keypair_bytes[32..].copy_from_slice(&self.keypair.private_key);
+        let signing_key = SigningKey::from_keypair_bytes(&keypair_bytes)
+            .expect("Could not create signing key in local registration finish");
+        let signature = signing_key.sign(&ciphertext);
         RegFinishRequest {
             peer_id: self.id.clone(),
             public_key: self.keypair.public_key,
             encrypted_envelope: ciphertext,
+            signature,
             nonce: nonce_bytes,
         }
     }
@@ -159,6 +174,22 @@ impl P2POpaqueNode {
 
 impl P2POpaqueNode {
     fn peer_registration_finish(&mut self, peer_req: RegFinishRequest) {
+        let peer_public_key = self.attempted_peer_public_keys.get(&peer_req.peer_id);
+        if let None = peer_public_key {
+            panic!("Could not find peer public key in peer registration finish")
+        }
+        let peer_public_key = peer_public_key.unwrap().clone();
+        if peer_public_key != peer_req.public_key {
+            panic!("Public key mismatch in peer registration finish")
+        }
+        let verifying_key = VerifyingKey::from_bytes(&peer_public_key)
+            .expect("Could not create verifying key in peer registration finish");
+        if !verifying_key
+            .verify(peer_req.encrypted_envelope.as_slice(), &peer_req.signature)
+            .is_ok()
+        {
+            panic!("Signature of peer registration attempt did not match")
+        }
         self.envelopes.insert(
             peer_req.peer_id,
             EncryptedEnvelope {
