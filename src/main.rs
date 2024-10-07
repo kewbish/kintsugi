@@ -6,6 +6,7 @@ use chacha20poly1305::{
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
@@ -99,6 +100,7 @@ impl P2POpaqueNode {
 struct RegFinishRequest {
     public_key: PublicKey,
     peer_id: String,
+    nonce: [u8; 12],
     encrypted_envelope: Vec<u8>,
 }
 
@@ -113,6 +115,7 @@ struct Envelope {
 struct EncryptedEnvelope {
     public_key: PublicKey,
     encrypted_envelope: Vec<u8>,
+    nonce: [u8; 12],
 }
 
 impl P2POpaqueNode {
@@ -132,7 +135,8 @@ impl P2POpaqueNode {
         hasher.update(unblinded_rwd.as_slice());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let nonce_bytes = [0u8; 12];
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let envelope = Envelope {
             keypair: self.keypair.clone(),
@@ -148,6 +152,7 @@ impl P2POpaqueNode {
             peer_id: self.id.clone(),
             public_key: self.keypair.public_key,
             encrypted_envelope: ciphertext,
+            nonce: nonce_bytes,
         }
     }
 }
@@ -159,6 +164,7 @@ impl P2POpaqueNode {
             EncryptedEnvelope {
                 public_key: peer_req.public_key,
                 encrypted_envelope: peer_req.encrypted_envelope,
+                nonce: peer_req.nonce,
             },
         );
     }
@@ -226,7 +232,7 @@ impl P2POpaqueNode {
         hasher.update(unblinded_rwd.as_slice());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let nonce_bytes = [0u8; 12];
+        let nonce_bytes = peer_resp.envelope.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext_bytes = cipher
             .decrypt(nonce, peer_resp.envelope.encrypted_envelope.as_ref())
