@@ -3,6 +3,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
+use curve25519_dalek::constants;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
@@ -25,7 +26,7 @@ struct Keypair {
 impl Keypair {
     fn new() -> Self {
         let private_key = Scalar::random(&mut OsRng);
-        let public_key = RistrettoPoint::default() * private_key;
+        let public_key = &constants::RISTRETTO_BASEPOINT_POINT * private_key;
         Keypair {
             private_key: private_key.to_bytes(),
             public_key: public_key.compress().to_bytes(),
@@ -142,7 +143,7 @@ struct Signature {
 impl Signature {
     fn new_with_keypair(message: &[u8], keypair: Keypair) -> Self {
         let nonce = Scalar::random(&mut OsRng);
-        let r_point = RistrettoPoint::default() * nonce;
+        let r_point = &constants::RISTRETTO_BASEPOINT_POINT * nonce;
         let mut hasher = Sha3_256::new();
         hasher.update(r_point.compress().as_bytes());
         hasher.update(keypair.public_key.as_slice());
@@ -168,7 +169,8 @@ impl Signature {
             .expect("Could not deserialize public key in signature verification")
             .decompress()
             .expect("Could not deserialize public key in signature verification");
-        let r_prime = RistrettoPoint::default() * self.signature - hash_scalar * public_key_point;
+        let r_prime =
+            &constants::RISTRETTO_BASEPOINT_POINT * self.signature - hash_scalar * public_key_point;
         r_prime == self.r_point
     }
 }

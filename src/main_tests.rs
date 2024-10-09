@@ -9,13 +9,14 @@ mod test {
 
         let reg_start_req = node_1.local_registration_start("password".to_string());
         assert_eq!(reg_start_req.peer_id, "Alice".to_string());
+        assert_eq!(reg_start_req.peer_public_key, node_1.keypair.public_key);
 
         let reg_start_resp = node_2.peer_registration_start(reg_start_req);
-        assert_eq!(reg_start_resp.peer_public_key, node_1.keypair.public_key);
+        assert_eq!(reg_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let reg_finish_req =
             node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        assert_eq!(reg_finish_req.peer_public_key, node_2.keypair.public_key);
+        assert_eq!(reg_finish_req.peer_public_key, node_1.keypair.public_key);
 
         node_2.peer_registration_finish(reg_finish_req);
         assert!(node_2.peer_opaque_keys.contains_key("Alice"));
@@ -25,7 +26,7 @@ mod test {
         assert_eq!(login_start_req.peer_id, "Alice".to_string());
 
         let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+        assert_eq!(login_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let keypair = node_1.local_login_finish("password".to_string(), login_start_resp);
         assert_eq!(keypair.public_key, node_1.keypair.public_key);
@@ -41,11 +42,11 @@ mod test {
         assert_eq!(reg_start_req.peer_id, "Alice".to_string());
 
         let reg_start_resp = node_2.peer_registration_start(reg_start_req);
-        assert_eq!(reg_start_resp.peer_public_key, node_1.keypair.public_key);
+        assert_eq!(reg_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let reg_finish_req =
             node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        assert_eq!(reg_finish_req.peer_public_key, node_2.keypair.public_key);
+        assert_eq!(reg_finish_req.peer_public_key, node_1.keypair.public_key);
 
         node_2.peer_registration_finish(reg_finish_req);
         assert!(node_2.peer_opaque_keys.contains_key("Alice"));
@@ -57,7 +58,7 @@ mod test {
         assert_eq!(login_start_req.peer_id, "Alice".to_string());
 
         let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+        assert_eq!(login_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let panics = std::panic::catch_unwind(|| {
             node_1.local_login_finish("password".to_string(), login_start_resp)
@@ -70,7 +71,7 @@ mod test {
         assert_eq!(login_start_req.peer_id, "Alice".to_string());
 
         let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+        assert_eq!(login_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let panics = std::panic::catch_unwind(|| {
             node_1.local_login_finish("password2".to_string(), login_start_resp)
@@ -83,7 +84,7 @@ mod test {
         assert_eq!(login_start_req.peer_id, "Alice".to_string());
 
         let login_start_resp = node_2.peer_login_start(login_start_req);
-        assert_eq!(login_start_resp.peer_public_key, node_1.keypair.public_key);
+        assert_eq!(login_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let panics = std::panic::catch_unwind(|| {
             node_1.local_login_finish("password3".to_string(), login_start_resp)
