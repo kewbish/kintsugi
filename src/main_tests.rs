@@ -266,7 +266,9 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(
+        expected = "A registration attempt from this node already exists in peer registration start"
+    )]
     fn test_duplicate_reqs() {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
@@ -280,10 +282,32 @@ mod test {
         node_2.peer_registration_start(reg_start_req_2);
     }
 
-    /*
-     * TODO:
-     * - injecting messages into another exchange
-     */
+    #[test]
+    #[should_panic(
+        expected = "Could not verify signature of registration request in peer registration finish"
+    )]
+    fn test_malicious_peer_reg_finish() {
+        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
+        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
+
+        let reg_start_req = node_1.local_registration_start("password".to_string());
+
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
+
+        let mut node_3 = P2POpaqueNode::new("Charlie".to_string());
+        let malicious_reg_start_req = node_3.local_registration_start("password".to_string());
+        node_2.peer_registration_start(malicious_reg_start_req); // to initialize the OPRF client
+
+        // finish registration with node 1's response, forge their peer ID and public key
+        let mut malicious_reg_finish_req =
+            node_3.local_registration_finish("password".to_string(), reg_start_resp.clone());
+        malicious_reg_finish_req.peer_id = "Alice".to_string();
+        malicious_reg_finish_req.peer_public_key = node_1.keypair.public_key;
+        malicious_reg_finish_req.nonce = [1u8; 12];
+        malicious_reg_finish_req.encrypted_envelope = b"Bad data!!".to_vec();
+
+        node_2.peer_registration_finish(malicious_reg_finish_req);
+    }
 }
 
 fn main() {}

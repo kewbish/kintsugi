@@ -17,7 +17,7 @@ type CS = voprf::Ristretto255;
 type PublicKey = [u8; 32];
 type PrivateKey = [u8; 32];
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct Keypair {
     private_key: PrivateKey,
     public_key: PublicKey,
@@ -34,7 +34,7 @@ impl Keypair {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct P2POpaqueNode {
     id: String,
     keypair: Keypair,
@@ -57,7 +57,7 @@ impl P2POpaqueNode {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct RegStartRequest {
     blinded_pwd: BlindedElement<CS>,
     peer_public_key: PublicKey,
@@ -78,7 +78,7 @@ impl P2POpaqueNode {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct RegStartResponse {
     rwd: EvaluationElement<CS>,
     peer_public_key: PublicKey,
@@ -111,7 +111,7 @@ impl P2POpaqueNode {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct RegFinishRequest {
     peer_public_key: PublicKey,
     peer_id: String,
@@ -120,21 +120,21 @@ struct RegFinishRequest {
     signature: Signature,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct Envelope {
     keypair: Keypair,
     peer_public_key: PublicKey,
     peer_id: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct EncryptedEnvelope {
     public_key: PublicKey,
     encrypted_envelope: Vec<u8>,
     nonce: [u8; 12],
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct Signature {
     r_point: RistrettoPoint,
     signature: Scalar,
@@ -243,7 +243,7 @@ impl P2POpaqueNode {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct LoginStartRequest {
     blinded_pwd: BlindedElement<CS>,
     peer_id: String,
@@ -262,7 +262,7 @@ impl P2POpaqueNode {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct LoginStartResponse {
     rwd: EvaluationElement<CS>,
     envelope: EncryptedEnvelope,
