@@ -15,7 +15,7 @@ mod test {
 
         let reg_finish_req =
             node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        assert_eq!(reg_finish_req.public_key, node_2.keypair.public_key);
+        assert_eq!(reg_finish_req.peer_public_key, node_2.keypair.public_key);
 
         node_2.peer_registration_finish(reg_finish_req);
         assert!(node_2.peer_opaque_keys.contains_key("Alice"));
@@ -45,7 +45,7 @@ mod test {
 
         let reg_finish_req =
             node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        assert_eq!(reg_finish_req.public_key, node_2.keypair.public_key);
+        assert_eq!(reg_finish_req.peer_public_key, node_2.keypair.public_key);
 
         node_2.peer_registration_finish(reg_finish_req);
         assert!(node_2.peer_opaque_keys.contains_key("Alice"));
@@ -265,39 +265,18 @@ mod test {
     }
 
     #[test]
+    #[should_panic]
     fn test_duplicate_reqs() {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
 
         let reg_start_req = node_1.local_registration_start("password".to_string());
 
-        let reg_start_resp = node_2.peer_registration_start(reg_start_req);
+        node_2.peer_registration_start(reg_start_req);
 
         // simulate node_1 not receiving the response and resending the req
         let reg_start_req_2 = node_1.local_registration_start("password2".to_string());
-        let reg_start_resp_2 = node_2.peer_registration_start(reg_start_req_2);
-
-        let reg_finish_req =
-            node_1.local_registration_finish("password".to_string(), reg_start_resp);
-        node_2.peer_registration_finish(reg_finish_req);
-
-        let reg_finish_req_2 =
-            node_1.local_registration_finish("password2".to_string(), reg_start_resp_2);
-        node_2.peer_registration_finish(reg_finish_req_2); // duplicate finish should overwrite
-                                                           // previous
-
-        let login_start_req = node_1.local_login_start("password".to_string());
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-        let panics = std::panic::catch_unwind(|| {
-            node_1.local_login_finish("password".to_string(), login_start_resp)
-        });
-        assert!(panics.is_err());
-
-        let login_start_req = node_1.local_login_start("password2".to_string());
-        let login_start_resp = node_2.peer_login_start(login_start_req);
-        let keypair = node_1.local_login_finish("password2".to_string(), login_start_resp);
-        assert_eq!(keypair.public_key, node_1.keypair.public_key);
-        assert_eq!(keypair.private_key, node_1.keypair.private_key);
+        node_2.peer_registration_start(reg_start_req_2);
     }
 
     /*

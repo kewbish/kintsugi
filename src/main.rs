@@ -3,7 +3,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -38,6 +38,7 @@ pub struct P2POpaqueNode {
     id: String,
     keypair: Keypair,
     peer_opaque_keys: HashMap<String, Keypair>,
+    peer_attempted_public_keys: HashMap<String, PublicKey>,
     envelopes: HashMap<String, EncryptedEnvelope>,
     oprf_client: Option<OprfClient<CS>>,
 }
@@ -48,6 +49,7 @@ impl P2POpaqueNode {
             id,
             keypair: Keypair::new(),
             peer_opaque_keys: HashMap::new(),
+            peer_attempted_public_keys: HashMap::new(),
             envelopes: HashMap::new(),
             oprf_client: None,
         }
@@ -57,6 +59,7 @@ impl P2POpaqueNode {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct RegStartRequest {
     blinded_pwd: BlindedElement<CS>,
+    peer_public_key: PublicKey,
     peer_id: String,
 }
 
@@ -68,6 +71,7 @@ impl P2POpaqueNode {
         self.oprf_client = Some(password_blind_result.state);
         RegStartRequest {
             blinded_pwd: password_blind_result.message,
+            peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
         }
     }
@@ -84,7 +88,17 @@ impl P2POpaqueNode {
     fn peer_registration_start(&mut self, peer_req: RegStartRequest) -> RegStartResponse {
         let opaque_keypair = Keypair::new();
         self.peer_opaque_keys
-            .insert(peer_req.peer_id, opaque_keypair.clone());
+            .insert(peer_req.peer_id.clone(), opaque_keypair.clone());
+        if self
+            .peer_attempted_public_keys
+            .contains_key(&peer_req.peer_id)
+        {
+            panic!(
+                "A registration attempt from this node already exists in peer registration start"
+            )
+        }
+        self.peer_attempted_public_keys
+            .insert(peer_req.peer_id, peer_req.peer_public_key);
         let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key)
             .expect("OPRF server creation failed for peer registration start");
         let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
@@ -98,10 +112,11 @@ impl P2POpaqueNode {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct RegFinishRequest {
-    public_key: PublicKey,
+    peer_public_key: PublicKey,
     peer_id: String,
     nonce: [u8; 12],
     encrypted_envelope: Vec<u8>,
+    signature: Signature,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -116,6 +131,46 @@ struct EncryptedEnvelope {
     public_key: PublicKey,
     encrypted_envelope: Vec<u8>,
     nonce: [u8; 12],
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Signature {
+    r_point: RistrettoPoint,
+    signature: Scalar,
+}
+
+impl Signature {
+    fn new_with_keypair(message: &[u8], keypair: Keypair) -> Self {
+        let nonce = Scalar::random(&mut OsRng);
+        let r_point = RistrettoPoint::default() * nonce;
+        let mut hasher = Sha3_256::new();
+        hasher.update(r_point.compress().as_bytes());
+        hasher.update(keypair.public_key.as_slice());
+        hasher.update(message);
+        let hash = hasher.finalize();
+        let hash_scalar = Scalar::from_bytes_mod_order(hash.as_slice().try_into().unwrap());
+        let private_key = Scalar::from_canonical_bytes(keypair.private_key)
+            .expect("Could not deserialize private key in signature generation");
+        Signature {
+            r_point,
+            signature: nonce + (private_key * hash_scalar),
+        }
+    }
+
+    fn verify(self, message: &[u8], public_key: PublicKey) -> bool {
+        let mut hasher = Sha3_256::new();
+        hasher.update(self.r_point.compress().as_bytes());
+        hasher.update(public_key.as_slice());
+        hasher.update(message);
+        let hash = hasher.finalize();
+        let hash_scalar = Scalar::from_bytes_mod_order(hash.as_slice().try_into().unwrap());
+        let public_key_point = CompressedRistretto::from_slice(&public_key)
+            .expect("Could not deserialize public key in signature verification")
+            .decompress()
+            .expect("Could not deserialize public key in signature verification");
+        let r_prime = RistrettoPoint::default() * self.signature - hash_scalar * public_key_point;
+        r_prime == self.r_point
+    }
 }
 
 impl P2POpaqueNode {
@@ -148,21 +203,37 @@ impl P2POpaqueNode {
         let ciphertext = cipher
             .encrypt(nonce, plaintext.as_bytes())
             .expect("Encryption of envelope failed in local registration finish");
+
+        let signature = Signature::new_with_keypair(&ciphertext, self.keypair.clone());
+
         RegFinishRequest {
             peer_id: self.id.clone(),
-            public_key: self.keypair.public_key,
+            peer_public_key: self.keypair.public_key,
             encrypted_envelope: ciphertext,
             nonce: nonce_bytes,
+            signature,
         }
     }
 }
 
 impl P2POpaqueNode {
     fn peer_registration_finish(&mut self, peer_req: RegFinishRequest) {
+        let peer_public_key = self.peer_attempted_public_keys.get(&peer_req.peer_id);
+        if let None = peer_public_key {
+            panic!(
+                "A registration attempt from this node does not exist in peer registration finish"
+            )
+        }
+        if !peer_req.signature.verify(
+            &peer_req.encrypted_envelope,
+            peer_public_key.unwrap().clone(),
+        ) {
+            panic!("Could not verify signature of registration request in peer registration finish")
+        }
         self.envelopes.insert(
             peer_req.peer_id,
             EncryptedEnvelope {
-                public_key: peer_req.public_key,
+                public_key: peer_req.peer_public_key,
                 encrypted_envelope: peer_req.encrypted_envelope,
                 nonce: peer_req.nonce,
             },
