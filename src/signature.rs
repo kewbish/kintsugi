@@ -3,6 +3,7 @@ use curve25519_dalek::constants;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
+#[allow(unused_imports)]
 use rand::RngCore;
 use sha3::{Digest, Sha3_256};
 

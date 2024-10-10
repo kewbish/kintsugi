@@ -17,6 +17,7 @@ use crate::signature::Signature;
 
 type CS = voprf::Ristretto255;
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum P2POpaqueError {
     RegistrationError,
     CryptoError(String),
@@ -62,7 +63,7 @@ impl P2POpaqueNode {
         let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng);
         if let Err(e) = password_blind_result {
             return Err(P2POpaqueError::CryptoError(
-                "OPRF client blinding failed".to_string() + &e.to_string(),
+                "OPRF client blinding failed: ".to_string() + &e.to_string(),
             ));
         }
         let password_blind_ok = password_blind_result.unwrap();
@@ -101,7 +102,7 @@ impl P2POpaqueNode {
         let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key);
         if let Err(e) = server {
             return Err(P2POpaqueError::CryptoError(
-                "OPRF server creation failed".to_string() + &e.to_string(),
+                "OPRF server creation failed: ".to_string() + &e.to_string(),
             ));
         }
         let password_blind_eval = server.unwrap().blind_evaluate(&peer_req.blinded_pwd);
@@ -151,7 +152,7 @@ impl P2POpaqueNode {
         let unblinded_rwd = oprf_client.finalize(&password.as_bytes(), &peer_resp.rwd);
         if let Err(e) = unblinded_rwd {
             return Err(P2POpaqueError::CryptoError(
-                "Unblinding failed".to_string() + &e.to_string(),
+                "Unblinding failed: ".to_string() + &e.to_string(),
             ));
         }
         let unblinded_rwd = unblinded_rwd.unwrap();
@@ -170,13 +171,13 @@ impl P2POpaqueNode {
         let plaintext = serde_json::to_string(&envelope);
         if let Err(e) = plaintext {
             return Err(P2POpaqueError::SerializationError(
-                "JSON serialization of envelope failed".to_string() + &e.to_string(),
+                "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
             ));
         }
         let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
         if let Err(e) = ciphertext {
             return Err(P2POpaqueError::CryptoError(
-                "Encryption of envelope failed".to_string() + &e.to_string(),
+                "Encryption of envelope failed: ".to_string() + &e.to_string(),
             ));
         }
         let ciphertext = ciphertext.unwrap();
@@ -234,7 +235,7 @@ impl P2POpaqueNode {
         let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng);
         if let Err(e) = password_blind_result {
             return Err(P2POpaqueError::CryptoError(
-                "OPRF client blinding failed".to_string() + &e.to_string(),
+                "OPRF client blinding failed: ".to_string() + &e.to_string(),
             ));
         }
         let password_blind_ok = password_blind_result.unwrap();
@@ -270,7 +271,7 @@ impl P2POpaqueNode {
         let server = OprfServer::<CS>::new_with_key(&local_opaque_keypair.unwrap().private_key);
         if let Err(e) = server {
             return Err(P2POpaqueError::CryptoError(
-                "OPRF server creation failed".to_string() + &e.to_string(),
+                "OPRF server creation failed: ".to_string() + &e.to_string(),
             ));
         }
         let password_blind_eval = server.unwrap().blind_evaluate(&peer_req.blinded_pwd);
@@ -298,7 +299,7 @@ impl P2POpaqueNode {
         let unblinded_rwd = oprf_client.finalize(&password.as_bytes(), &peer_resp.rwd);
         if let Err(e) = unblinded_rwd {
             return Err(P2POpaqueError::CryptoError(
-                "Unblinding failed".to_string() + &e.to_string(),
+                "Unblinding failed: ".to_string() + &e.to_string(),
             ));
         }
         let unblinded_rwd = unblinded_rwd.unwrap();
@@ -311,14 +312,14 @@ impl P2POpaqueNode {
         let plaintext_bytes = cipher.decrypt(nonce, peer_resp.envelope.encrypted_envelope.as_ref());
         if let Err(e) = plaintext_bytes {
             return Err(P2POpaqueError::CryptoError(
-                "Decryption failed".to_string() + &e.to_string(),
+                "Decryption failed: ".to_string() + &e.to_string(),
             ));
         }
         let plaintext_bytes = plaintext_bytes.unwrap();
         let plaintext: Result<Envelope, _> = serde_json::from_slice(&plaintext_bytes);
         if let Err(e) = plaintext {
             return Err(P2POpaqueError::SerializationError(
-                "Deserialization failed".to_string() + &e.to_string(),
+                "Deserialization failed: ".to_string() + &e.to_string(),
             ));
         }
         let plaintext = plaintext.unwrap();
