@@ -3,35 +3,24 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use curve25519_dalek::constants;
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
-use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
 
+mod keypair;
+use crate::keypair::{Keypair, PublicKey};
+
+mod signature;
+use crate::signature::Signature;
+
 type CS = voprf::Ristretto255;
 
-type PublicKey = [u8; 32];
-type PrivateKey = [u8; 32];
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-struct Keypair {
-    private_key: PrivateKey,
-    public_key: PublicKey,
-}
-
-impl Keypair {
-    fn new() -> Self {
-        let private_key = Scalar::random(&mut OsRng);
-        let public_key = &constants::RISTRETTO_BASEPOINT_POINT * private_key;
-        Keypair {
-            private_key: private_key.to_bytes(),
-            public_key: public_key.compress().to_bytes(),
-        }
-    }
+pub enum P2POpaqueError {
+    RegistrationError,
+    CryptoError(String),
+    SerializationError(String),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -65,16 +54,24 @@ struct RegStartRequest {
 }
 
 impl P2POpaqueNode {
-    fn local_registration_start(&mut self, password: String) -> RegStartRequest {
+    fn local_registration_start(
+        &mut self,
+        password: String,
+    ) -> Result<RegStartRequest, P2POpaqueError> {
         let mut rng = OsRng;
-        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng)
-            .expect("OPRF client blinding failed for local registration start");
-        self.oprf_client = Some(password_blind_result.state);
-        RegStartRequest {
-            blinded_pwd: password_blind_result.message,
+        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng);
+        if let Err(e) = password_blind_result {
+            return Err(P2POpaqueError::CryptoError(
+                "OPRF client blinding failed".to_string() + &e.to_string(),
+            ));
+        }
+        let password_blind_ok = password_blind_result.unwrap();
+        self.oprf_client = Some(password_blind_ok.state);
+        Ok(RegStartRequest {
+            blinded_pwd: password_blind_ok.message,
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
-        }
+        })
     }
 }
 
@@ -86,7 +83,10 @@ struct RegStartResponse {
 }
 
 impl P2POpaqueNode {
-    fn peer_registration_start(&mut self, peer_req: RegStartRequest) -> RegStartResponse {
+    fn peer_registration_start(
+        &mut self,
+        peer_req: RegStartRequest,
+    ) -> Result<RegStartResponse, P2POpaqueError> {
         let opaque_keypair = Keypair::new();
         self.peer_opaque_keys
             .insert(peer_req.peer_id.clone(), opaque_keypair.clone());
@@ -94,20 +94,22 @@ impl P2POpaqueNode {
             .peer_attempted_public_keys
             .contains_key(&peer_req.peer_id)
         {
-            panic!(
-                "A registration attempt from this node already exists in peer registration start"
-            )
+            return Err(P2POpaqueError::RegistrationError);
         }
         self.peer_attempted_public_keys
             .insert(peer_req.peer_id, peer_req.peer_public_key);
-        let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key)
-            .expect("OPRF server creation failed for peer registration start");
-        let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
-        RegStartResponse {
+        let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key);
+        if let Err(e) = server {
+            return Err(P2POpaqueError::CryptoError(
+                "OPRF server creation failed".to_string() + &e.to_string(),
+            ));
+        }
+        let password_blind_eval = server.unwrap().blind_evaluate(&peer_req.blinded_pwd);
+        Ok(RegStartResponse {
             rwd: password_blind_eval,
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
-        }
+        })
     }
 }
 
@@ -134,60 +136,25 @@ struct EncryptedEnvelope {
     nonce: [u8; 12],
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-struct Signature {
-    r_point: RistrettoPoint,
-    signature: Scalar,
-}
-
-impl Signature {
-    fn new_with_keypair(message: &[u8], keypair: Keypair) -> Self {
-        let nonce = Scalar::random(&mut OsRng);
-        let r_point = &constants::RISTRETTO_BASEPOINT_POINT * nonce;
-        let mut hasher = Sha3_256::new();
-        hasher.update(r_point.compress().as_bytes());
-        hasher.update(keypair.public_key.as_slice());
-        hasher.update(message);
-        let hash = hasher.finalize();
-        let hash_scalar = Scalar::from_bytes_mod_order(hash.as_slice().try_into().unwrap());
-        let private_key = Scalar::from_canonical_bytes(keypair.private_key)
-            .expect("Could not deserialize private key in signature generation");
-        Signature {
-            r_point,
-            signature: nonce + (private_key * hash_scalar),
-        }
-    }
-
-    fn verify(self, message: &[u8], public_key: PublicKey) -> bool {
-        let mut hasher = Sha3_256::new();
-        hasher.update(self.r_point.compress().as_bytes());
-        hasher.update(public_key.as_slice());
-        hasher.update(message);
-        let hash = hasher.finalize();
-        let hash_scalar = Scalar::from_bytes_mod_order(hash.as_slice().try_into().unwrap());
-        let public_key_point = CompressedRistretto::from_slice(&public_key)
-            .expect("Could not deserialize public key in signature verification")
-            .decompress()
-            .expect("Could not deserialize public key in signature verification");
-        let r_prime =
-            &constants::RISTRETTO_BASEPOINT_POINT * self.signature - hash_scalar * public_key_point;
-        r_prime == self.r_point
-    }
-}
-
 impl P2POpaqueNode {
     fn local_registration_finish(
         &mut self,
         password: String,
         peer_resp: RegStartResponse,
-    ) -> RegFinishRequest {
+    ) -> Result<RegFinishRequest, P2POpaqueError> {
         if let None = self.oprf_client {
-            panic!("OPRF client not initialized during local registration finish")
+            return Err(P2POpaqueError::CryptoError(
+                "OPRF client not initialized".to_string(),
+            ));
         }
         let oprf_client = self.oprf_client.as_ref().unwrap();
-        let unblinded_rwd = oprf_client
-            .finalize(&password.as_bytes(), &peer_resp.rwd)
-            .expect("Unblinding failed for local registration finish");
+        let unblinded_rwd = oprf_client.finalize(&password.as_bytes(), &peer_resp.rwd);
+        if let Err(e) = unblinded_rwd {
+            return Err(P2POpaqueError::CryptoError(
+                "Unblinding failed".to_string() + &e.to_string(),
+            ));
+        }
+        let unblinded_rwd = unblinded_rwd.unwrap();
         let mut hasher = Sha3_256::new();
         hasher.update(unblinded_rwd.as_slice());
         let key = hasher.finalize();
@@ -200,37 +167,48 @@ impl P2POpaqueNode {
             peer_public_key: peer_resp.peer_public_key,
             peer_id: peer_resp.peer_id,
         };
-        let plaintext = serde_json::to_string(&envelope)
-            .expect("JSON serialization of envelope failed in local registration finish");
-        let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_bytes())
-            .expect("Encryption of envelope failed in local registration finish");
-
+        let plaintext = serde_json::to_string(&envelope);
+        if let Err(e) = plaintext {
+            return Err(P2POpaqueError::SerializationError(
+                "JSON serialization of envelope failed".to_string() + &e.to_string(),
+            ));
+        }
+        let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
+        if let Err(e) = ciphertext {
+            return Err(P2POpaqueError::CryptoError(
+                "Encryption of envelope failed".to_string() + &e.to_string(),
+            ));
+        }
+        let ciphertext = ciphertext.unwrap();
         let signature = Signature::new_with_keypair(&ciphertext, self.keypair.clone());
 
-        RegFinishRequest {
+        Ok(RegFinishRequest {
             peer_id: self.id.clone(),
             peer_public_key: self.keypair.public_key,
             encrypted_envelope: ciphertext,
             nonce: nonce_bytes,
             signature,
-        }
+        })
     }
 }
 
 impl P2POpaqueNode {
-    fn peer_registration_finish(&mut self, peer_req: RegFinishRequest) {
+    fn peer_registration_finish(
+        &mut self,
+        peer_req: RegFinishRequest,
+    ) -> Result<(), P2POpaqueError> {
         let peer_public_key = self.peer_attempted_public_keys.get(&peer_req.peer_id);
         if let None = peer_public_key {
-            panic!(
-                "A registration attempt from this node does not exist in peer registration finish"
-            )
+            // don't leak that a registration attempt was not started
+            return Ok(());
         }
         if !peer_req.signature.verify(
             &peer_req.encrypted_envelope,
             peer_public_key.unwrap().clone(),
         ) {
-            panic!("Could not verify signature of registration request in peer registration finish")
+            return Err(P2POpaqueError::CryptoError(
+                "Could not verify signature of registration request".to_string(),
+            ));
         }
         self.envelopes.insert(
             peer_req.peer_id,
@@ -240,6 +218,7 @@ impl P2POpaqueNode {
                 nonce: peer_req.nonce,
             },
         );
+        return Ok(());
     }
 }
 
@@ -250,15 +229,20 @@ struct LoginStartRequest {
 }
 
 impl P2POpaqueNode {
-    fn local_login_start(&mut self, password: String) -> LoginStartRequest {
+    fn local_login_start(&mut self, password: String) -> Result<LoginStartRequest, P2POpaqueError> {
         let mut rng = OsRng;
-        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng)
-            .expect("OPRF client blinding failed for local login start");
-        self.oprf_client = Some(password_blind_result.state);
-        LoginStartRequest {
-            blinded_pwd: password_blind_result.message,
-            peer_id: self.id.clone(),
+        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng);
+        if let Err(e) = password_blind_result {
+            return Err(P2POpaqueError::CryptoError(
+                "OPRF client blinding failed".to_string() + &e.to_string(),
+            ));
         }
+        let password_blind_ok = password_blind_result.unwrap();
+        self.oprf_client = Some(password_blind_ok.state);
+        Ok(LoginStartRequest {
+            blinded_pwd: password_blind_ok.message,
+            peer_id: self.id.clone(),
+        })
     }
 }
 
@@ -271,48 +255,74 @@ struct LoginStartResponse {
 }
 
 impl P2POpaqueNode {
-    fn peer_login_start(&self, peer_req: LoginStartRequest) -> LoginStartResponse {
+    fn peer_login_start(
+        &self,
+        peer_req: LoginStartRequest,
+    ) -> Result<LoginStartResponse, P2POpaqueError> {
         let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.peer_id);
         if let None = local_opaque_keypair {
-            panic!("Could not find local keypair for peer login start")
+            return Err(P2POpaqueError::RegistrationError);
         }
         let envelope = self.envelopes.get(&peer_req.peer_id);
         if let None = envelope {
-            panic!("Could not find envelope for peer login start")
+            return Err(P2POpaqueError::RegistrationError);
         }
-        let server = OprfServer::<CS>::new_with_key(&local_opaque_keypair.unwrap().private_key)
-            .expect("OPRF server creation failed for peer login start");
-        let password_blind_eval = server.blind_evaluate(&peer_req.blinded_pwd);
-        LoginStartResponse {
+        let server = OprfServer::<CS>::new_with_key(&local_opaque_keypair.unwrap().private_key);
+        if let Err(e) = server {
+            return Err(P2POpaqueError::CryptoError(
+                "OPRF server creation failed".to_string() + &e.to_string(),
+            ));
+        }
+        let password_blind_eval = server.unwrap().blind_evaluate(&peer_req.blinded_pwd);
+        Ok(LoginStartResponse {
             rwd: password_blind_eval,
             envelope: envelope.unwrap().clone(),
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
-        }
+        })
     }
 }
 
 impl P2POpaqueNode {
-    fn local_login_finish(&self, password: String, peer_resp: LoginStartResponse) -> Keypair {
+    fn local_login_finish(
+        &self,
+        password: String,
+        peer_resp: LoginStartResponse,
+    ) -> Result<Keypair, P2POpaqueError> {
         if let None = self.oprf_client {
-            panic!("OPRF client not initialized during local registration finish")
+            return Err(P2POpaqueError::CryptoError(
+                "OPRF client not initialized".to_string(),
+            ));
         }
         let oprf_client = self.oprf_client.as_ref().unwrap();
-        let unblinded_rwd = oprf_client
-            .finalize(&password.as_bytes(), &peer_resp.rwd)
-            .expect("Unblinding failed for local login finish");
+        let unblinded_rwd = oprf_client.finalize(&password.as_bytes(), &peer_resp.rwd);
+        if let Err(e) = unblinded_rwd {
+            return Err(P2POpaqueError::CryptoError(
+                "Unblinding failed".to_string() + &e.to_string(),
+            ));
+        }
+        let unblinded_rwd = unblinded_rwd.unwrap();
         let mut hasher = Sha3_256::new();
         hasher.update(unblinded_rwd.as_slice());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let nonce_bytes = peer_resp.envelope.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext_bytes = cipher
-            .decrypt(nonce, peer_resp.envelope.encrypted_envelope.as_ref())
-            .expect("Decryption failed for local login finish");
-        let plaintext: Envelope = serde_json::from_slice(&plaintext_bytes)
-            .expect("Deserialization failed for local login finish");
-        plaintext.keypair
+        let plaintext_bytes = cipher.decrypt(nonce, peer_resp.envelope.encrypted_envelope.as_ref());
+        if let Err(e) = plaintext_bytes {
+            return Err(P2POpaqueError::CryptoError(
+                "Decryption failed".to_string() + &e.to_string(),
+            ));
+        }
+        let plaintext_bytes = plaintext_bytes.unwrap();
+        let plaintext: Result<Envelope, _> = serde_json::from_slice(&plaintext_bytes);
+        if let Err(e) = plaintext {
+            return Err(P2POpaqueError::SerializationError(
+                "Deserialization failed".to_string() + &e.to_string(),
+            ));
+        }
+        let plaintext = plaintext.unwrap();
+        Ok(plaintext.keypair)
     }
 }
 

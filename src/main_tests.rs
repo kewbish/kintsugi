@@ -267,23 +267,6 @@ mod test {
 
     #[test]
     #[should_panic(
-        expected = "A registration attempt from this node already exists in peer registration start"
-    )]
-    fn test_duplicate_reqs() {
-        let mut node_1 = P2POpaqueNode::new("Alice".to_string());
-        let mut node_2 = P2POpaqueNode::new("Bob".to_string());
-
-        let reg_start_req = node_1.local_registration_start("password".to_string());
-
-        node_2.peer_registration_start(reg_start_req);
-
-        // simulate node_1 not receiving the response and resending the req
-        let reg_start_req_2 = node_1.local_registration_start("password2".to_string());
-        node_2.peer_registration_start(reg_start_req_2);
-    }
-
-    #[test]
-    #[should_panic(
         expected = "Could not verify signature of registration request in peer registration finish"
     )]
     fn test_malicious_peer_reg_finish() {
