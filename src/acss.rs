@@ -1,52 +1,56 @@
 use std::collections::{HashMap, HashSet};
 
 use chacha20poly1305::{
-use sha3::{Digest, Sha3_256};
-    aead::{Aead, AeadCore, KeyInit},
+    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 
 use crate::{keypair::PublicKey, P2POpaqueError};
 
 struct ZKP {
-    // adapted from https://github.com/tyurek/dpss/blob/main/dpss/acss_dcr_ped.py#L162C4-L188C1
-    blinded_commitment: RistrettoPoint,
-    z: Scalar,
-    e_u: String,
-    w: Scalar,
-    z_hat: Scalar,
-    e_hat_u: String,
-    w_hat: Scalar,
+    // does not prove knowledge under encryption but verifies commitment
+    A: RistrettoPoint,
+    z_1: Scalar,
+    z_2: Scalar,
 }
 
 impl ZKP {
-    fn new(phi_i: Scalar, phi_hat_i: Scalar, commitment: RistrettoPoint, v_i: Vec<u8>, v_hat_i: Vec<u8>, public_key: PublicKey, nonce_i: [u8;32], nonce_hat_i: [u8;32]) -> Self {
-        let u = Scalar::random(&mut OsRng);
-        let u_hat = Scalar::random(&mut OsRng);
-        let T = RISTRETTO_BASEPOINT_POINT * u;
+    fn new(
+        phi_i: Scalar,
+        phi_hat_i: Scalar,
+        h_point: RistrettoPoint,
+        commitment: RistrettoPoint,
+    ) -> Self {
+        let r_1 = Scalar::random(&mut OsRng);
+        let r_2 = Scalar::random(&mut OsRng);
+        let A = r_1 * RISTRETTO_BASEPOINT_POINT + r_2 * h_point;
+
         let mut hasher = Sha3_256::new();
-        hasher.update(public_key.as_slice());
+        hasher.update(A.compress().to_bytes());
+        hasher.update(h_point.compress().to_bytes());
         hasher.update(commitment.compress().to_bytes());
-        hasher.update(v_i.as_slice());
-        hasher.update(v_hat_i.as_slice());
-        hasher.update(T.compress().to_bytes());
-        let e = hasher.finalize();
-        let e_scalar = Scalar::from_bytes_mod_order(e);
-        let z = u + e_scalar * phi_i;
-        let z_hat = u_hat + e_scalar * phi_hat_i;
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&public_key));
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let mut nonce_hat_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_hat_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let nonce_hat = Nonce::from_slice(&nonce_hat_bytes);
-        let e_u = cipher.encrypt(nonce, u.to_bytes().as_slice());
-        let e_hat_u = cipher.encrypt(nonce_hat, u_hat.to_bytes().as_slice());
+        let challenge_hash = hasher.finalize();
+        let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
+
+        let z_1 = r_1 + challenge * phi_i;
+        let z_2 = r_2 + challenge * phi_hat_i;
+        ZKP { A, z_1, z_2 }
+    }
+    fn verify(proof: ZKP, h_point: RistrettoPoint, commitment: RistrettoPoint) -> bool {
+        let mut hasher = Sha3_256::new();
+        hasher.update(proof.A.compress().to_bytes());
+        hasher.update(h_point.compress().to_bytes());
+        hasher.update(commitment.compress().to_bytes());
+        let challenge_hash = hasher.finalize();
+        let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
+
+        return proof.z_1 * RISTRETTO_BASEPOINT_POINT + proof.z_2 * h_point
+            == proof.A + challenge * commitment;
     }
 }
 
@@ -114,6 +118,10 @@ struct ACSSInputs {
 struct ACSSShare {
     index: usize,
     nonce: [u8; 12],
+    v_i: Vec<u8>,
+    v_hat_i: Vec<u8>,
+    c_i: RistrettoPoint,
+    proof: ZKP,
 }
 
 impl ACSS {
@@ -122,7 +130,7 @@ impl ACSS {
         secret: Scalar,
         degree: usize,
     ) -> Result<HashMap<String, ACSSShare>, P2POpaqueError> {
-        let shares = HashMap::new();
+        let mut shares = HashMap::new();
         let phi = Polynomial::new_w_secret(degree, secret);
         let phi_hat = Polynomial::new(degree);
 
@@ -145,18 +153,36 @@ impl ACSS {
 
             let v_i = cipher.encrypt(nonce, phi_bytes.as_slice());
             if let Err(e) = v_i {
-                return Err(P2POpaqueError::CryptoError("Encryption failed".to_string() + &e.to_string()))
+                return Err(P2POpaqueError::CryptoError(
+                    "Encryption failed".to_string() + &e.to_string(),
+                ));
             }
-            let v_i = v_i.unwrap()
+            let v_i = v_i.unwrap();
 
             let v_hat_i = cipher.encrypt(nonce, phi_hat_bytes.as_slice());
             if let Err(e) = v_hat_i {
-                return Err(P2POpaqueError::CryptoError("Encryption failed".to_string() + &e.to_string()))
+                return Err(P2POpaqueError::CryptoError(
+                    "Encryption failed".to_string() + &e.to_string(),
+                ));
             }
-            let v_hat_i = v_hat_i.unwrap()
+            let v_hat_i = v_hat_i.unwrap();
 
             let c_i = phi.at(i) * RISTRETTO_BASEPOINT_POINT + phi_hat.at(i) * inputs.h_point;
+            let proof = ZKP::new(phi_hat.at(i), phi_hat.at(i), inputs.h_point, c_i);
+
+            shares.insert(
+                peer_id.clone(),
+                ACSSShare {
+                    index: i,
+                    nonce: nonce_bytes,
+                    v_i,
+                    v_hat_i,
+                    c_i,
+                    proof,
+                },
+            );
         }
+
         Ok(shares)
     }
 }
