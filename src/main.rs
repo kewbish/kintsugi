@@ -15,6 +15,8 @@ use crate::keypair::{Keypair, PublicKey};
 mod signature;
 use crate::signature::Signature;
 
+mod acss;
+
 type CS = voprf::Ristretto255;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
