@@ -101,13 +101,21 @@ impl BivariatePolynomial {
 }
 
 pub fn get_lagrange_coefficient(current_index: Scalar, all_indices: HashSet<Scalar>) -> Scalar {
+    get_lagrange_coefficient_w_target(Scalar::ZERO, current_index, all_indices)
+}
+
+pub fn get_lagrange_coefficient_w_target(
+    target: Scalar,
+    current_index: Scalar,
+    all_indices: HashSet<Scalar>,
+) -> Scalar {
     let mut numerator = Scalar::ONE;
     let mut denominator = Scalar::ONE;
 
     for index in all_indices.iter() {
         if index.clone() != current_index {
-            numerator *= index;
-            denominator *= index - current_index;
+            numerator *= target - index;
+            denominator *= current_index - index;
         }
     }
 
