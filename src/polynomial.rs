@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -55,4 +57,59 @@ impl Polynomial {
         }
         value
     }
+    pub fn at_scalar(&self, i: Scalar) -> Scalar {
+        let mut value = Scalar::ZERO;
+        for index in 0..self.coeffs.len() {
+            value = value * i + self.coeffs[index];
+        }
+        value
+    }
+}
+
+pub struct BivariatePolynomial {
+    pub(crate) polynomials: HashMap<Scalar, Polynomial>,
+}
+
+impl BivariatePolynomial {
+    pub fn interpolate_0_j(&self, j: Scalar) -> Scalar {
+        if !self.polynomials.contains_key(&j) {
+            return Scalar::ZERO;
+        }
+
+        let b_i_j: HashMap<Scalar, Scalar> = self
+            .polynomials
+            .iter()
+            .map(|(i, poly)| (i.clone(), poly.clone().at_scalar(j)))
+            .collect();
+
+        let mut acc = Scalar::ZERO;
+
+        for (i, i_value) in b_i_j.iter() {
+            let mut numerator = Scalar::ONE;
+            let mut denominator = Scalar::ONE;
+
+            for (j, _) in b_i_j.iter() {
+                if i != j {
+                    numerator = numerator * j;
+                    denominator = denominator * (j - i);
+                }
+                acc = acc + i_value * numerator * denominator.invert();
+            }
+        }
+        acc
+    }
+}
+
+pub fn get_lagrange_coefficient(current_index: Scalar, all_indices: HashSet<Scalar>) -> Scalar {
+    let mut numerator = Scalar::ONE;
+    let mut denominator = Scalar::ONE;
+
+    for index in all_indices.iter() {
+        if index.clone() != current_index {
+            numerator *= index;
+            denominator *= index - current_index;
+        }
+    }
+
+    numerator * denominator.invert()
 }
