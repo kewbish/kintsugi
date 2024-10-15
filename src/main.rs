@@ -17,6 +17,7 @@ use crate::signature::Signature;
 
 mod acss;
 mod dpss;
+mod oprf;
 mod polynomial;
 
 type CS = voprf::Ristretto255;
