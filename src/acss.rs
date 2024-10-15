@@ -10,7 +10,10 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use crate::{keypair::PublicKey, P2POpaqueError};
+use crate::{
+    keypair::{Keypair, PublicKey},
+    P2POpaqueError,
+};
 
 struct ZKP {
     // does not prove knowledge under encryption but verifies commitment
@@ -41,16 +44,17 @@ impl ZKP {
         let z_2 = r_2 + challenge * phi_hat_i;
         ZKP { A, z_1, z_2 }
     }
-    fn verify(proof: ZKP, h_point: RistrettoPoint, commitment: RistrettoPoint) -> bool {
+
+    fn verify(&self, h_point: RistrettoPoint, commitment: RistrettoPoint) -> bool {
         let mut hasher = Sha3_256::new();
-        hasher.update(proof.A.compress().to_bytes());
+        hasher.update(self.A.compress().to_bytes());
         hasher.update(h_point.compress().to_bytes());
         hasher.update(commitment.compress().to_bytes());
         let challenge_hash = hasher.finalize();
         let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
 
-        return proof.z_1 * RISTRETTO_BASEPOINT_POINT + proof.z_2 * h_point
-            == proof.A + challenge * commitment;
+        return self.z_1 * RISTRETTO_BASEPOINT_POINT + self.z_2 * h_point
+            == self.A + challenge * commitment;
     }
 }
 
@@ -115,7 +119,7 @@ struct ACSSInputs {
     peer_public_keys: HashMap<String, PublicKey>,
 }
 
-struct ACSSShare {
+struct ACSSDealerShare {
     index: usize,
     nonce: [u8; 12],
     v_i: Vec<u8>,
@@ -124,26 +128,21 @@ struct ACSSShare {
     proof: ZKP,
 }
 
+struct ACSSNodeShare {
+    s_i_d: Scalar,
+    s_hat_i_d: Scalar,
+    c_i: RistrettoPoint,
+}
+
 impl ACSS {
-    fn share(
+    fn share_dealer(
         inputs: ACSSInputs,
         secret: Scalar,
         degree: usize,
-    ) -> Result<HashMap<String, ACSSShare>, P2POpaqueError> {
+    ) -> Result<HashMap<String, ACSSDealerShare>, P2POpaqueError> {
         let mut shares = HashMap::new();
         let phi = Polynomial::new_w_secret(degree, secret);
         let phi_hat = Polynomial::new(degree);
-
-        let phi_bytes = phi.clone().to_bytes();
-        if let Err(e) = phi_bytes {
-            return Err(e);
-        }
-        let phi_bytes = phi_bytes.unwrap();
-        let phi_hat_bytes = phi_hat.clone().to_bytes();
-        if let Err(e) = phi_hat_bytes {
-            return Err(e);
-        }
-        let phi_hat_bytes = phi_hat_bytes.unwrap();
 
         for (i, (peer_id, public_key)) in inputs.peer_public_keys.iter().enumerate() {
             let cipher = ChaCha20Poly1305::new(Key::from_slice(public_key));
@@ -151,7 +150,7 @@ impl ACSS {
             OsRng.fill_bytes(&mut nonce_bytes);
             let nonce = Nonce::from_slice(&nonce_bytes);
 
-            let v_i = cipher.encrypt(nonce, phi_bytes.as_slice());
+            let v_i = cipher.encrypt(nonce, phi.at(i).to_bytes().as_slice());
             if let Err(e) = v_i {
                 return Err(P2POpaqueError::CryptoError(
                     "Encryption failed".to_string() + &e.to_string(),
@@ -159,7 +158,7 @@ impl ACSS {
             }
             let v_i = v_i.unwrap();
 
-            let v_hat_i = cipher.encrypt(nonce, phi_hat_bytes.as_slice());
+            let v_hat_i = cipher.encrypt(nonce, phi_hat.at(i).to_bytes().as_slice());
             if let Err(e) = v_hat_i {
                 return Err(P2POpaqueError::CryptoError(
                     "Encryption failed".to_string() + &e.to_string(),
@@ -172,7 +171,7 @@ impl ACSS {
 
             shares.insert(
                 peer_id.clone(),
-                ACSSShare {
+                ACSSDealerShare {
                     index: i,
                     nonce: nonce_bytes,
                     v_i,
@@ -184,5 +183,60 @@ impl ACSS {
         }
 
         Ok(shares)
+    }
+
+    fn share(
+        inputs: ACSSInputs,
+        share: ACSSDealerShare,
+        keypair: Keypair,
+    ) -> Result<ACSSNodeShare, P2POpaqueError> {
+        if !share.proof.verify(inputs.h_point, share.c_i) {
+            return Err(P2POpaqueError::CryptoError(
+                "ZKP was not accepted".to_string(),
+            ));
+        }
+
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&keypair.private_key));
+        let nonce_bytes = share.nonce;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let s_i_d_bytes = cipher.decrypt(nonce, share.v_i.as_ref());
+        if let Err(e) = s_i_d_bytes {
+            return Err(P2POpaqueError::CryptoError(
+                "Decryption failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let s_i_d_bytes = s_i_d_bytes.unwrap();
+        let s_i_d_bytes: Result<[u8; 32], _> = s_i_d_bytes.try_into();
+        if let Err(_) = s_i_d_bytes {
+            return Err(P2POpaqueError::SerializationError(
+                "Deserialization failed: ".to_string(),
+            ));
+        }
+        let s_i_d_bytes = s_i_d_bytes.unwrap();
+        let s_i_d = Scalar::from_bytes_mod_order(s_i_d_bytes);
+
+        let s_hat_i_d_bytes = cipher.decrypt(nonce, share.v_hat_i.as_ref());
+        if let Err(e) = s_hat_i_d_bytes {
+            return Err(P2POpaqueError::CryptoError(
+                "Decryption failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let s_hat_i_d_bytes = s_hat_i_d_bytes.unwrap();
+        let s_hat_i_d_bytes: Result<[u8; 32], _> = s_hat_i_d_bytes.try_into();
+        if let Err(_) = s_hat_i_d_bytes {
+            return Err(P2POpaqueError::SerializationError(
+                "Deserialization failed: ".to_string(),
+            ));
+        }
+        let s_hat_i_d_bytes = s_hat_i_d_bytes.unwrap();
+        let s_hat_i_d = Scalar::from_bytes_mod_order(s_hat_i_d_bytes);
+
+        let c_i = s_i_d * RISTRETTO_BASEPOINT_POINT + s_hat_i_d * inputs.h_point;
+
+        Ok(ACSSNodeShare {
+            s_i_d,
+            s_hat_i_d,
+            c_i,
+        })
     }
 }
