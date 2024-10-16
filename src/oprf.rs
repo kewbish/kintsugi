@@ -3,9 +3,11 @@ use std::collections::HashSet;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 use crate::{polynomial, P2POpaqueError};
 
+#[derive(Serialize, Deserialize)]
 pub struct OPRFClient {
     current_blinding_scalar: Option<Scalar>,
 }
@@ -45,3 +47,7 @@ impl OPRFServer {
         return lagrange_coeff * eval_secret_share * point;
     }
 }
+
+#[cfg(test)]
+#[path = "oprf_tests.rs"]
+mod oprf_test;

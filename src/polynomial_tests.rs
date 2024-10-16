@@ -10,6 +10,18 @@ mod polynomial_test {
         Polynomial,
     };
 
+    fn i32_to_scalar(i: i32) -> Scalar {
+        let mut acc = Scalar::ZERO;
+        for _ in 0..i.abs() {
+            if i > 0 {
+                acc += Scalar::ONE;
+            } else {
+                acc -= Scalar::ONE;
+            }
+        }
+        acc
+    }
+
     #[test]
     fn test_new_w_secret() {
         let secret = Scalar::random(&mut OsRng);
@@ -48,18 +60,6 @@ mod polynomial_test {
 
     #[test]
     fn test_lagrange_coeffs() {
-        fn i32_to_scalar(i: i32) -> Scalar {
-            let mut acc = Scalar::ZERO;
-            for _ in 0..i.abs() {
-                if i > 0 {
-                    acc += Scalar::ONE;
-                } else {
-                    acc -= Scalar::ONE;
-                }
-            }
-            acc
-        }
-
         // precomputed for x = 1,2,3
         let all_indices = HashSet::from([Scalar::ONE, i32_to_scalar(2), i32_to_scalar(3)]);
         assert_eq!(
@@ -109,6 +109,25 @@ mod polynomial_test {
                 all_indices.clone()
             ),
             Scalar::ONE
+        );
+    }
+
+    #[test]
+    fn test_lagrange_interp_to_zero() {
+        let secret = Scalar::random(&mut OsRng);
+        let polynomial = Polynomial::new_w_secret(2, secret);
+        assert_eq!(polynomial.at(0), secret);
+        let share_1 = polynomial.at(1);
+        let share_2 = polynomial.at(2);
+        let share_3 = polynomial.at(3);
+
+        let all_indices = HashSet::from([Scalar::ONE, i32_to_scalar(2), i32_to_scalar(3)]);
+
+        assert_eq!(
+            get_lagrange_coefficient(Scalar::ONE, all_indices.clone()) * share_1
+                + get_lagrange_coefficient(i32_to_scalar(2), all_indices.clone()) * share_2
+                + get_lagrange_coefficient(i32_to_scalar(3), all_indices.clone()) * share_3,
+            secret
         );
     }
 }
