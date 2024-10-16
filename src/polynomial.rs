@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::P2POpaqueError;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Polynomial {
     pub(crate) coeffs: Vec<Scalar>,
 }
@@ -49,18 +49,25 @@ impl Polynomial {
         }
         Ok(res.unwrap())
     }
+    fn pow(base: Scalar, index: usize) -> Scalar {
+        let mut acc = Scalar::ONE;
+        for _ in 0..index {
+            acc *= base;
+        }
+        acc
+    }
     pub fn at(&self, i: usize) -> Scalar {
         let i_scalar = usize_to_scalar(i);
         let mut value = Scalar::ZERO;
         for index in 0..self.coeffs.len() {
-            value = value * i_scalar + self.coeffs[index];
+            value += self.coeffs[index] * Polynomial::pow(i_scalar, index);
         }
         value
     }
     pub fn at_scalar(&self, i: Scalar) -> Scalar {
         let mut value = Scalar::ZERO;
         for index in 0..self.coeffs.len() {
-            value = value * i + self.coeffs[index];
+            value += self.coeffs[index] * Polynomial::pow(i, index);
         }
         value
     }
@@ -121,3 +128,7 @@ pub fn get_lagrange_coefficient_w_target(
 
     numerator * denominator.invert()
 }
+
+#[cfg(test)]
+#[path = "polynomial_tests.rs"]
+mod polynomial_test;
