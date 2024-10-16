@@ -20,7 +20,7 @@ fn usize_to_scalar(i: usize) -> Scalar {
 
 impl Polynomial {
     pub fn new(degree: usize) -> Self {
-        let mut polynomial = Vec::with_capacity(degree + 1);
+        let mut polynomial = vec![Scalar::ZERO; degree + 1];
         for i in 0..(degree + 1) {
             polynomial[i] = Scalar::random(&mut OsRng)
         }

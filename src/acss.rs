@@ -4,69 +4,30 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_POINT, ristretto::CompressedRistretto, scalar::Scalar,
+    RistrettoPoint,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha3::{Digest, Sha3_256};
 
 use crate::{
-    keypair::{Keypair, PublicKey},
+    keypair::{Keypair, PrivateKey, PublicKey},
     polynomial::Polynomial,
+    zkp::ZKP,
     P2POpaqueError,
 };
 
-struct ZKP {
-    // does not prove knowledge under encryption but verifies commitment
-    A: RistrettoPoint,
-    z_1: Scalar,
-    z_2: Scalar,
-}
-
-impl ZKP {
-    fn new(
-        phi_i: Scalar,
-        phi_hat_i: Scalar,
-        h_point: RistrettoPoint,
-        commitment: RistrettoPoint,
-    ) -> Self {
-        let r_1 = Scalar::random(&mut OsRng);
-        let r_2 = Scalar::random(&mut OsRng);
-        let A = r_1 * RISTRETTO_BASEPOINT_POINT + r_2 * h_point;
-
-        let mut hasher = Sha3_256::new();
-        hasher.update(A.compress().to_bytes());
-        hasher.update(h_point.compress().to_bytes());
-        hasher.update(commitment.compress().to_bytes());
-        let challenge_hash = hasher.finalize();
-        let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
-
-        let z_1 = r_1 + challenge * phi_i;
-        let z_2 = r_2 + challenge * phi_hat_i;
-        ZKP { A, z_1, z_2 }
-    }
-
-    fn verify(&self, h_point: RistrettoPoint, commitment: RistrettoPoint) -> bool {
-        let mut hasher = Sha3_256::new();
-        hasher.update(self.A.compress().to_bytes());
-        hasher.update(h_point.compress().to_bytes());
-        hasher.update(commitment.compress().to_bytes());
-        let challenge_hash = hasher.finalize();
-        let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
-
-        return self.z_1 * RISTRETTO_BASEPOINT_POINT + self.z_2 * h_point
-            == self.A + challenge * commitment;
-    }
-}
-
 struct ACSS {}
 
+#[derive(Clone)]
 struct ACSSInputs {
     h_point: RistrettoPoint,
     degree: usize,
-    committee: HashMap<String, RistrettoPoint>,
     peer_public_keys: HashMap<String, PublicKey>,
 }
 
+#[derive(Clone)]
 struct ACSSDealerShare {
     index: usize,
     nonce: [u8; 12],
@@ -76,6 +37,7 @@ struct ACSSDealerShare {
     proof: ZKP,
 }
 
+#[derive(Clone)]
 struct ACSSNodeShare {
     s_i_d: Scalar,
     s_hat_i_d: Scalar,
@@ -87,13 +49,30 @@ impl ACSS {
         inputs: ACSSInputs,
         secret: Scalar,
         degree: usize,
+        dealer_key: PrivateKey,
     ) -> Result<HashMap<String, ACSSDealerShare>, P2POpaqueError> {
         let mut shares = HashMap::new();
         let phi = Polynomial::new_w_secret(degree, secret);
         let phi_hat = Polynomial::new(degree);
 
         for (i, (peer_id, public_key)) in inputs.peer_public_keys.iter().enumerate() {
-            let cipher = ChaCha20Poly1305::new(Key::from_slice(public_key));
+            let dealer_private_key_scalar = Scalar::from_bytes_mod_order(dealer_key);
+            let peer_public_key_point = CompressedRistretto::from_slice(public_key);
+            if let Err(e) = peer_public_key_point {
+                return Err(P2POpaqueError::SerializationError(
+                    "Error deserializing public key".to_string(),
+                ));
+            }
+            let peer_public_key_point = peer_public_key_point.unwrap().decompress();
+            if let None = peer_public_key_point {
+                return Err(P2POpaqueError::SerializationError(
+                    "Error deserializing public key".to_string(),
+                ));
+            }
+            let shared_secret = dealer_private_key_scalar * peer_public_key_point.unwrap();
+
+            let cipher =
+                ChaCha20Poly1305::new(Key::from_slice(&shared_secret.compress().to_bytes()));
             let mut nonce_bytes = [0u8; 12];
             OsRng.fill_bytes(&mut nonce_bytes);
             let nonce = Nonce::from_slice(&nonce_bytes);
@@ -115,7 +94,7 @@ impl ACSS {
             let v_hat_i = v_hat_i.unwrap();
 
             let c_i = phi.at(i) * RISTRETTO_BASEPOINT_POINT + phi_hat.at(i) * inputs.h_point;
-            let proof = ZKP::new(phi_hat.at(i), phi_hat.at(i), inputs.h_point, c_i);
+            let proof = ZKP::new(phi.at(i), phi_hat.at(i), inputs.h_point, c_i);
 
             shares.insert(
                 peer_id.clone(),
@@ -137,6 +116,7 @@ impl ACSS {
         inputs: ACSSInputs,
         share: ACSSDealerShare,
         keypair: Keypair,
+        dealer_key: PublicKey,
     ) -> Result<ACSSNodeShare, P2POpaqueError> {
         if !share.proof.verify(inputs.h_point, share.c_i) {
             return Err(P2POpaqueError::CryptoError(
@@ -144,7 +124,22 @@ impl ACSS {
             ));
         }
 
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&keypair.private_key));
+        let private_key_scalar = Scalar::from_bytes_mod_order(keypair.private_key);
+        let dealer_public_key_point = CompressedRistretto::from_slice(&dealer_key);
+        if let Err(e) = dealer_public_key_point {
+            return Err(P2POpaqueError::SerializationError(
+                "Error deserializing public key".to_string(),
+            ));
+        }
+        let dealer_public_key_point = dealer_public_key_point.unwrap().decompress();
+        if let None = dealer_public_key_point {
+            return Err(P2POpaqueError::SerializationError(
+                "Error deserializing public key".to_string(),
+            ));
+        }
+        let shared_secret = private_key_scalar * dealer_public_key_point.unwrap();
+
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&shared_secret.compress().to_bytes()));
         let nonce_bytes = share.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let s_i_d_bytes = cipher.decrypt(nonce, share.v_i.as_ref());
@@ -188,3 +183,7 @@ impl ACSS {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "acss_tests.rs"]
+mod acss_test;

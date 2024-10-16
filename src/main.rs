@@ -19,6 +19,7 @@ mod acss;
 mod dpss;
 mod oprf;
 mod polynomial;
+mod zkp;
 
 type CS = voprf::Ristretto255;
 
