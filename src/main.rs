@@ -3,6 +3,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
+use keypair::PrivateKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha3::{Digest, Sha3_256};
@@ -129,18 +130,74 @@ struct RegFinishRequest {
     signature: Signature,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Eq, PartialEq, Clone)]
 struct Envelope {
     keypair: Keypair,
     peer_public_key: PublicKey,
     peer_id: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+impl Envelope {
+    fn encrypt_w_password(self, password: String) -> Result<EncryptedEnvelope, P2POpaqueError> {
+        let mut hasher = Sha3_256::new();
+        hasher.update(password.as_bytes());
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let plaintext = serde_json::to_string(&self);
+        if let Err(e) = plaintext {
+            return Err(P2POpaqueError::SerializationError(
+                "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
+        if let Err(e) = ciphertext {
+            return Err(P2POpaqueError::CryptoError(
+                "Encryption of envelope failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let ciphertext = ciphertext.unwrap();
+
+        Ok(EncryptedEnvelope {
+            public_key: None,
+            encrypted_envelope: ciphertext,
+            nonce: nonce_bytes,
+        })
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct EncryptedEnvelope {
-    public_key: PublicKey,
+    public_key: Option<PublicKey>,
     encrypted_envelope: Vec<u8>,
     nonce: [u8; 12],
+}
+
+impl EncryptedEnvelope {
+    fn decrypt_w_password(self, password: String) -> Result<Envelope, P2POpaqueError> {
+        let mut hasher = Sha3_256::new();
+        hasher.update(password.as_bytes());
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let nonce = Nonce::from_slice(&self.nonce);
+        let plaintext_bytes = cipher.decrypt(nonce, self.encrypted_envelope.as_ref());
+        if let Err(e) = plaintext_bytes {
+            return Err(P2POpaqueError::CryptoError(
+                "Decryption failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let plaintext_bytes = plaintext_bytes.unwrap();
+        let plaintext: Result<Envelope, _> = serde_json::from_slice(&plaintext_bytes);
+        if let Err(e) = plaintext {
+            return Err(P2POpaqueError::SerializationError(
+                "Deserialization failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        Ok(plaintext.unwrap())
+    }
 }
 
 impl P2POpaqueNode {
@@ -220,7 +277,7 @@ impl P2POpaqueNode {
         self.envelopes.insert(
             peer_req.peer_id,
             EncryptedEnvelope {
-                public_key: peer_req.peer_public_key,
+                public_key: Some(peer_req.peer_public_key),
                 encrypted_envelope: peer_req.encrypted_envelope,
                 nonce: peer_req.nonce,
             },
@@ -335,6 +392,10 @@ impl P2POpaqueNode {
 
 #[cfg(test)]
 #[path = "main_tests.rs"]
-mod test;
+mod local_encdec_test;
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod opaque_test;
 
 fn main() {}

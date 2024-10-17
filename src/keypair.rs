@@ -7,7 +7,7 @@ use rand::RngCore;
 pub type PublicKey = [u8; 32];
 pub type PrivateKey = [u8; 32];
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Keypair {
     pub(crate) private_key: PrivateKey,
     pub(crate) public_key: PublicKey,
