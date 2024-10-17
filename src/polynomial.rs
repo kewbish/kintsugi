@@ -97,11 +97,11 @@ impl BivariatePolynomial {
 
             for (j, _) in b_i_j.iter() {
                 if i != j {
-                    numerator = numerator * j;
-                    denominator = denominator * (j - i);
+                    numerator *= j;
+                    denominator *= j - i;
                 }
-                acc = acc + i_value * numerator * denominator.invert();
             }
+            acc = acc + i_value * numerator * denominator.invert();
         }
         acc
     }
