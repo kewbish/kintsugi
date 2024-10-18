@@ -15,12 +15,12 @@ use crate::{
     P2POpaqueError,
 };
 
-struct RandomnessExtractor {
+pub struct RandomnessExtractor {
     himatrix: Vec<Vec<Scalar>>,
 }
 
 impl RandomnessExtractor {
-    fn new(rows: usize, cols: usize) -> Self {
+    pub fn new(rows: usize, cols: usize) -> Self {
         if rows == 0 || cols == 0 {
             panic!("Hyper-invertible matrix size must be greater than 0");
         }
@@ -54,7 +54,7 @@ impl RandomnessExtractor {
     }
 
     #[cfg(test)]
-    fn verify_hyper_invertible(&self) -> bool {
+    pub fn verify_hyper_invertible(&self) -> bool {
         if self.himatrix.len() == 0 || self.himatrix[0].len() == 0 {
             return false;
         }
@@ -108,7 +108,7 @@ impl RandomnessExtractor {
         true
     }
 
-    fn multiply_vector(&self, vec: Vec<Scalar>) -> Vec<Scalar> {
+    pub fn multiply_vector(&self, vec: Vec<Scalar>) -> Vec<Scalar> {
         if self.himatrix.len() == 0 || vec.len() != self.himatrix[0].len() {
             panic!("Vector is the wrong size to multiply with the matrix");
         }
@@ -124,30 +124,31 @@ impl RandomnessExtractor {
     }
 }
 
-struct DKG {}
+pub struct DKG {}
 
-struct DKGAgreements {
-    fhalf_shares: Vec<Scalar>,
-    fhalf_hat_shares: Vec<Scalar>,
-    shalf_shares: Vec<Scalar>,
-    shalf_hat_shares: Vec<Scalar>,
-    fhalf_commitments: Vec<RistrettoPoint>,
-    shalf_commitments: Vec<RistrettoPoint>,
+pub struct DKGAgreements {
+    pub(crate) fhalf_shares: Vec<Scalar>,
+    pub(crate) fhalf_hat_shares: Vec<Scalar>,
+    pub(crate) shalf_shares: Vec<Scalar>,
+    pub(crate) shalf_hat_shares: Vec<Scalar>,
+    pub(crate) fhalf_commitments: Vec<RistrettoPoint>,
+    pub(crate) shalf_commitments: Vec<RistrettoPoint>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct DKGKeyDerivation {
-    g_z_i: RistrettoPoint,
-    h_z_hat_i: RistrettoPoint,
-    zkp: DLPZKP,
-    zkp_hat: DLPZKP,
+pub struct DKGKeyDerivation {
+    pub(crate) g_z_i: RistrettoPoint,
+    pub(crate) h_z_hat_i: RistrettoPoint,
+    pub(crate) zkp: DLPZKP,
+    pub(crate) zkp_hat: DLPZKP,
+    pub(crate) h_point: RistrettoPoint,
 }
 
 impl DKG {
-    fn share() -> (Scalar, Scalar) {
+    pub fn share() -> (Scalar, Scalar) {
         (Scalar::random(&mut OsRng), Scalar::random(&mut OsRng))
     }
-    fn agreement_vec(
+    pub fn agreement_vec(
         consensus: HashSet<Scalar>,
         a: Polynomial,
         a_hat: Polynomial,
@@ -163,7 +164,7 @@ impl DKG {
         let mut u_commitments = Vec::new();
         let mut v_commitments = Vec::new();
 
-        for i in 1..max_nodes + 1 {
+        for i in 0..max_nodes + 1 {
             if consensus.contains(&i32_to_scalar(i as i32)) {
                 a_shares.push(a.at(i));
                 a_hat_shares.push(a_hat.at(i));
@@ -174,6 +175,12 @@ impl DKG {
                 v_commitments
                     .push(b.at(i) * RISTRETTO_BASEPOINT_POINT + b_hat.at(i) * h_point.clone());
             } else {
+                a_shares.push(Scalar::ZERO);
+                a_hat_shares.push(Scalar::ZERO);
+                b_shares.push(Scalar::ZERO);
+                b_hat_shares.push(Scalar::ZERO);
+                u_commitments.push(Scalar::ZERO * RISTRETTO_BASEPOINT_POINT);
+                v_commitments.push(Scalar::ZERO * RISTRETTO_BASEPOINT_POINT);
             }
         }
 
@@ -187,12 +194,12 @@ impl DKG {
         }
     }
 
-    fn randomness_extraction(
-        num_sshares: usize,
+    pub fn randomness_extraction(
         threshold: usize,
         node_agreements: DKGAgreements,
+        max_nodes: usize,
     ) -> (Vec<Scalar>, Vec<Scalar>) {
-        let re = RandomnessExtractor::new(threshold / 2, num_sshares);
+        let re = RandomnessExtractor::new(threshold / 2, node_agreements.fhalf_shares.len());
         let z_fhalf_shares = re.multiply_vector(node_agreements.fhalf_shares);
         let z_fhalf_hat_shares = re.multiply_vector(node_agreements.fhalf_hat_shares);
         let z_shalf_shares = re.multiply_vector(node_agreements.shalf_shares);
@@ -202,21 +209,20 @@ impl DKG {
         let z_poly_share = Polynomial {
             coeffs: z_shares.clone(),
         };
-        let executions: Vec<Scalar> = (0..z_shares.len()).map(|x| z_poly_share.at(x)).collect();
+        let executions: Vec<Scalar> = (0..max_nodes + 1).map(|x| z_poly_share.at(x)).collect();
 
         let mut z_hat_shares = z_fhalf_hat_shares.clone();
         z_hat_shares.append(&mut z_shalf_hat_shares.clone());
         let z_hat_poly_share = Polynomial {
             coeffs: z_hat_shares.clone(),
         };
-        let executions_hat: Vec<Scalar> = (0..z_hat_shares.len())
-            .map(|x| z_hat_poly_share.at(x))
-            .collect();
+        let executions_hat: Vec<Scalar> =
+            (0..max_nodes + 1).map(|x| z_hat_poly_share.at(x)).collect();
 
         (executions, executions_hat)
     }
 
-    fn pre_key_derivation(
+    pub fn pre_key_derivation(
         index: usize,
         execution_result: HashMap<Scalar, Scalar>,
         execution_hat_result: HashMap<Scalar, Scalar>,
@@ -243,7 +249,7 @@ impl DKG {
         (z_i, z_hat_i)
     }
 
-    fn pre_key_derivation_public(
+    pub fn pre_key_derivation_public(
         z_i: Scalar,
         z_hat_i: Scalar,
         h_point: RistrettoPoint,
@@ -251,18 +257,27 @@ impl DKG {
         DKGKeyDerivation {
             g_z_i: RISTRETTO_BASEPOINT_POINT * z_i,
             h_z_hat_i: h_point * z_hat_i,
-            zkp: DLPZKP::new(z_i, RISTRETTO_BASEPOINT_POINT * z_i),
-            zkp_hat: DLPZKP::new(z_hat_i, h_point * z_hat_i),
+            zkp: DLPZKP::new(
+                z_i,
+                RISTRETTO_BASEPOINT_POINT,
+                RISTRETTO_BASEPOINT_POINT * z_i,
+            ),
+            zkp_hat: DLPZKP::new(z_hat_i, h_point, h_point * z_hat_i),
+            h_point,
         }
     }
 
-    fn key_derivation(
+    pub fn key_derivation(
         total_size: usize,
         key_deriv: HashMap<Scalar, DKGKeyDerivation>,
     ) -> Result<HashMap<Scalar, RistrettoPoint>, P2POpaqueError> {
         for (_, derivation) in key_deriv.clone().iter() {
-            if !derivation.zkp.verify(derivation.g_z_i)
-                || !derivation.zkp_hat.verify(derivation.h_z_hat_i)
+            if !derivation
+                .zkp
+                .verify(RISTRETTO_BASEPOINT_POINT, derivation.g_z_i)
+                || !derivation
+                    .zkp_hat
+                    .verify(derivation.h_point, derivation.h_z_hat_i)
             {
                 return Err(P2POpaqueError::CryptoError(
                     "ZKP could not be verified".to_string(),
@@ -289,12 +304,5 @@ impl DKG {
 }
 
 #[cfg(test)]
-mod dkg_tests {
-    use super::*;
-
-    #[test]
-    fn test_hi_matrix() {
-        let re = RandomnessExtractor::new(5, 5); // anything above 8 works in theory but takes ages to run
-        assert!(re.verify_hyper_invertible());
-    }
-}
+#[path = "dkg_tests.rs"]
+mod dkg_tests;

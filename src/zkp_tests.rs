@@ -3,7 +3,7 @@ mod zkp_test {
     use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, Scalar};
     use rand::rngs::OsRng;
 
-    use crate::zkp::ZKP;
+    use crate::zkp::{DLPZKP, ZKP};
 
     #[test]
     fn test_zkp_verify() {
@@ -20,5 +20,25 @@ mod zkp_test {
 
         let fake_h_point = h_point + h_point;
         assert!(!zkp.verify(fake_h_point, commitment));
+    }
+
+    #[test]
+    fn test_dlpzkp_verify() {
+        let x = Scalar::random(&mut OsRng);
+        let public_point = x * RISTRETTO_BASEPOINT_POINT;
+        let zkp = DLPZKP::new(x, RISTRETTO_BASEPOINT_POINT, public_point);
+
+        assert!(zkp.verify(RISTRETTO_BASEPOINT_POINT, public_point));
+
+        let fake_commitment = x * RISTRETTO_BASEPOINT_POINT + public_point;
+        assert!(!zkp.verify(RISTRETTO_BASEPOINT_POINT, fake_commitment));
+        assert!(!zkp.verify(fake_commitment, public_point));
+
+        let h_point = public_point;
+        let x = Scalar::random(&mut OsRng);
+        let public_point = x * h_point;
+        let zkp = DLPZKP::new(x, h_point, public_point);
+
+        assert!(zkp.verify(h_point, public_point));
     }
 }

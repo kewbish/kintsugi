@@ -60,11 +60,11 @@ pub struct DLPZKP {
 }
 
 impl DLPZKP {
-    pub fn new(secret: Scalar, public_point: RistrettoPoint) -> Self {
+    pub fn new(secret: Scalar, base_point: RistrettoPoint, public_point: RistrettoPoint) -> Self {
         let r = Scalar::random(&mut OsRng);
-        let u = r * RISTRETTO_BASEPOINT_POINT;
+        let u = r * base_point;
         let mut hasher = Sha3_256::new();
-        hasher.update(RISTRETTO_BASEPOINT_POINT.compress().to_bytes());
+        hasher.update(base_point.compress().to_bytes());
         hasher.update(public_point.compress().to_bytes());
         hasher.update(u.compress().to_bytes());
         let challenge_hash = hasher.finalize();
@@ -74,14 +74,14 @@ impl DLPZKP {
         DLPZKP { u, c: challenge, z }
     }
 
-    pub fn verify(&self, public_point: RistrettoPoint) -> bool {
+    pub fn verify(&self, base_point: RistrettoPoint, public_point: RistrettoPoint) -> bool {
         let mut hasher = Sha3_256::new();
-        hasher.update(RISTRETTO_BASEPOINT_POINT.compress().to_bytes());
+        hasher.update(base_point.compress().to_bytes());
         hasher.update(public_point.compress().to_bytes());
         hasher.update(self.u.compress().to_bytes());
         let challenge_hash = hasher.finalize();
         let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
 
-        return self.z * RISTRETTO_BASEPOINT_POINT == self.u + challenge * public_point;
+        return self.z * base_point == self.u + challenge * public_point;
     }
 }
