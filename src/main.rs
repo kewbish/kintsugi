@@ -17,6 +17,7 @@ mod signature;
 use crate::signature::Signature;
 
 mod acss;
+mod dkg;
 mod dpss;
 mod oprf;
 mod polynomial;
