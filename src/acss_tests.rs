@@ -1,28 +1,3 @@
-#[cfg(test)]
-mod zkp_test {
-    use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, Scalar};
-    use rand::rngs::OsRng;
-
-    use crate::acss::ZKP;
-
-    #[test]
-    fn test_zkp_verify() {
-        let phi_i = Scalar::random(&mut OsRng);
-        let phi_hat_i = Scalar::random(&mut OsRng);
-        let h_point = Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT;
-        let commitment = phi_i * RISTRETTO_BASEPOINT_POINT + phi_hat_i * h_point;
-        let zkp = ZKP::new(phi_i, phi_hat_i, h_point, commitment);
-
-        assert!(zkp.verify(h_point, commitment));
-
-        let fake_commitment = phi_i * RISTRETTO_BASEPOINT_POINT + phi_i * h_point;
-        assert!(!zkp.verify(h_point, fake_commitment));
-
-        let fake_h_point = h_point + h_point;
-        assert!(!zkp.verify(fake_h_point, commitment));
-    }
-}
-
 mod acss_test {
     use std::collections::HashMap;
 
@@ -54,9 +29,9 @@ mod acss_test {
         let secret = Scalar::random(&mut OsRng);
         let dealer_keypair = Keypair::new();
 
-        let shares = ACSS::share_dealer(inputs, secret, degree, dealer_keypair.private_key);
-        assert!(shares.is_ok());
-        let shares = shares.unwrap();
+        let result = ACSS::share_dealer(inputs, secret, degree, dealer_keypair.private_key);
+        assert!(result.is_ok());
+        let (shares, _, _) = result.unwrap();
         assert!(shares.contains_key("Alice"));
         assert!(shares.contains_key("Bob"));
 
@@ -86,7 +61,7 @@ mod acss_test {
 
         let secret = Scalar::random(&mut OsRng);
         let dealer_keypair = Keypair::new();
-        let shares =
+        let (shares, _, _) =
             ACSS::share_dealer(inputs.clone(), secret, degree, dealer_keypair.private_key).unwrap();
 
         let alice_share = shares.get("Alice").unwrap();

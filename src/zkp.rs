@@ -1,6 +1,7 @@
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 #[derive(Clone)]
@@ -50,3 +51,37 @@ impl ZKP {
 #[cfg(test)]
 #[path = "zkp_tests.rs"]
 mod zkp_test;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DLPZKP {
+    u: RistrettoPoint,
+    c: Scalar,
+    z: Scalar,
+}
+
+impl DLPZKP {
+    pub fn new(secret: Scalar, public_point: RistrettoPoint) -> Self {
+        let r = Scalar::random(&mut OsRng);
+        let u = r * RISTRETTO_BASEPOINT_POINT;
+        let mut hasher = Sha3_256::new();
+        hasher.update(RISTRETTO_BASEPOINT_POINT.compress().to_bytes());
+        hasher.update(public_point.compress().to_bytes());
+        hasher.update(u.compress().to_bytes());
+        let challenge_hash = hasher.finalize();
+        let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
+        let z = r + challenge * secret;
+
+        DLPZKP { u, c: challenge, z }
+    }
+
+    pub fn verify(&self, public_point: RistrettoPoint) -> bool {
+        let mut hasher = Sha3_256::new();
+        hasher.update(RISTRETTO_BASEPOINT_POINT.compress().to_bytes());
+        hasher.update(public_point.compress().to_bytes());
+        hasher.update(self.u.compress().to_bytes());
+        let challenge_hash = hasher.finalize();
+        let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
+
+        return self.z * RISTRETTO_BASEPOINT_POINT == self.u + challenge * public_point;
+    }
+}

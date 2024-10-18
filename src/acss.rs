@@ -50,7 +50,7 @@ impl ACSS {
         secret: Scalar,
         degree: usize,
         dealer_key: PrivateKey,
-    ) -> Result<HashMap<String, ACSSDealerShare>, P2POpaqueError> {
+    ) -> Result<(HashMap<String, ACSSDealerShare>, Polynomial, Polynomial), P2POpaqueError> {
         let mut shares = HashMap::new();
         let phi = Polynomial::new_w_secret(degree, secret);
         let phi_hat = Polynomial::new(degree);
@@ -109,7 +109,7 @@ impl ACSS {
             );
         }
 
-        Ok(shares)
+        Ok((shares, phi, phi_hat))
     }
 
     fn share(
