@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
+use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::P2POpaqueError;
+use crate::opaque::P2POpaqueError;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Polynomial {

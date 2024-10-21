@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod opaque_test {
-    use crate::{P2POpaqueError, P2POpaqueNode};
+    use crate::opaque::{P2POpaqueError, P2POpaqueNode};
 
     #[test]
     fn test_happy_path() -> Result<(), P2POpaqueError> {
@@ -339,7 +339,7 @@ mod opaque_test {
 
 #[cfg(test)]
 mod local_encdec_test {
-    use crate::{keypair::Keypair, Envelope};
+    use crate::{keypair::Keypair, opaque::Envelope};
 
     #[test]
     fn test_enc_dec_local_envelope() {

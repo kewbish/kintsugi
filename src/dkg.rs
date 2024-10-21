@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-};
+use std::collections::{HashMap, HashSet};
 
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
 use itertools::Itertools;
@@ -9,10 +6,10 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    opaque::P2POpaqueError,
     polynomial::{get_lagrange_coefficient_w_target, Polynomial},
     util::i32_to_scalar,
     zkp::DLPZKP,
-    P2POpaqueError,
 };
 
 pub struct RandomnessExtractor {

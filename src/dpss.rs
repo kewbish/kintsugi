@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, RistrettoPoint, Scalar};
 
 use crate::{
+    opaque::P2POpaqueError,
     polynomial::{get_lagrange_coefficient_w_target, BivariatePolynomial, Polynomial},
-    P2POpaqueError,
 };
 
 struct DPSS {}

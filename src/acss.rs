@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use curve25519_dalek::{
@@ -13,9 +13,9 @@ use rand::RngCore;
 
 use crate::{
     keypair::{Keypair, PrivateKey, PublicKey},
+    opaque::P2POpaqueError,
     polynomial::Polynomial,
     zkp::ZKP,
-    P2POpaqueError,
 };
 
 struct ACSS {}

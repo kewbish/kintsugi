@@ -1,8 +1,6 @@
 use curve25519_dalek::constants;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
-#[allow(unused_imports)]
-use rand::RngCore;
 
 pub type PublicKey = [u8; 32];
 pub type PrivateKey = [u8; 32];

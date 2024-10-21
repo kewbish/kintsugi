@@ -2,10 +2,9 @@ use std::collections::HashSet;
 
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use rand::rngs::OsRng;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::{polynomial, P2POpaqueError};
+use crate::{opaque::P2POpaqueError, polynomial};
 
 #[derive(Serialize, Deserialize)]
 pub struct OPRFClient {
