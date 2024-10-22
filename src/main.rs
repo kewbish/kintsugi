@@ -10,10 +10,12 @@ mod util;
 mod zkp;
 
 use futures::prelude::*;
+use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{gossipsub, mdns};
+use libp2p::{gossipsub, identify, kad, mdns, Multiaddr, PeerId};
 use sha3::{Digest, Sha3_256};
 use std::error::Error;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
@@ -21,8 +23,18 @@ use tracing_subscriber::EnvFilter;
 #[derive(NetworkBehaviour)]
 struct P2PBehaviour {
     gossipsub: gossipsub::Behaviour,
+    kad: kad::Behaviour<MemoryStore>,
+    identify: identify::Behaviour,
     mdns: mdns::tokio::Behaviour,
 }
+
+/* // from IPFS network
+const BOOTNODES: [&str; 4] = [
+    "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    "QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+    "QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+    "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+];*/
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -57,19 +69,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 gossipsub_config,
             )?;
 
+            let kad = kad::Behaviour::new(
+                key.public().to_peer_id(),
+                kad::store::MemoryStore::new(key.public().to_peer_id()),
+            );
+
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/ipfs/id/1.0.0".to_string(),
+                key.public(),
+            ));
+
             let mdns =
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
-            Ok(P2PBehaviour { gossipsub, mdns })
+
+            Ok(P2PBehaviour {
+                gossipsub,
+                kad,
+                identify,
+                mdns,
+            })
         })?
         .with_swarm_config(|cfg| {
             cfg.with_idle_connection_timeout(std::time::Duration::from_secs(u64::MAX))
         })
         .build();
+    swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Server));
 
     let topic = gossipsub::IdentTopic::new("p2p-opaque");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     let mut stdin = io::BufReader::new(io::stdin()).lines();
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // the bootstrap nodes aren't listening on this topic, need to run own nodes
+    /*let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
+    for peer in &BOOTNODES {
+        swarm
+            .behaviour_mut()
+            .kad
+            .add_address(&PeerId::from_str(peer)?, bootaddr.clone());
+    }
+    swarm.behaviour_mut().kad.bootstrap()?;*/
 
     loop {
         select! {
@@ -81,6 +120,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
+                     println!("Routing updated with peer: {:?}", peer);
+                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+                },
+                SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::UnroutablePeer { peer })) => {
+                    swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
+                },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered a new peer: {peer_id}");
