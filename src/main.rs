@@ -1,4 +1,5 @@
 mod acss;
+mod coin;
 mod dkg;
 mod dpss;
 mod keypair;
@@ -10,6 +11,7 @@ mod util;
 mod zkp;
 
 use futures::prelude::*;
+use keypair::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, Multiaddr, PeerId};
@@ -19,6 +21,10 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
+
+struct NodeState {
+    opaque_keypair: Keypair,
+}
 
 #[derive(NetworkBehaviour)]
 struct P2PBehaviour {
@@ -41,6 +47,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+
+    let mut state = NodeState {
+        opaque_keypair: Keypair::new(),
+    };
 
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
