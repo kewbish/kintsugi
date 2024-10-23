@@ -10,20 +10,30 @@ mod signature;
 mod util;
 mod zkp;
 
+use curve25519_dalek::Scalar;
 use futures::prelude::*;
 use keypair::Keypair;
+use libp2p::gossipsub::{IdentTopic, Message, MessageId};
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{gossipsub, identify, kad, mdns, Multiaddr, PeerId};
+use libp2p::{gossipsub, identify, kad, mdns, Multiaddr, PeerId, Swarm};
 use sha3::{Digest, Sha3_256};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
+use util::i32_to_scalar;
 
 struct NodeState {
     opaque_keypair: Keypair,
+}
+
+struct BVBroadcastNodeState {
+    bin_values: HashSet<Scalar>,
+    has_second_broadcasted: bool,
+    received_from: HashMap<Scalar, HashSet<PeerId>>,
 }
 
 #[derive(NetworkBehaviour)]
@@ -52,6 +62,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         opaque_keypair: Keypair::new(),
     };
 
+    let mut bv_state = BVBroadcastNodeState {
+        bin_values: HashSet::new(),
+        has_second_broadcasted: false,
+        received_from: HashMap::new(),
+    };
+
+    let max_malicious = 1;
+
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(
@@ -63,6 +81,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let message_id_fn = |message: &gossipsub::Message| {
                 let mut hasher = Sha3_256::new();
                 hasher.update(message.data.clone());
+                hasher.update(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                        .to_le_bytes(),
+                );
                 let message_hash = hasher.finalize();
                 gossipsub::MessageId::from(format!("{:X}", message_hash))
             };
@@ -120,12 +145,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     swarm.behaviour_mut().kad.bootstrap()?;*/
 
+    fn handle_bv_state_receive(
+        bv_state: &mut BVBroadcastNodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        topic: IdentTopic,
+        max_malicious: usize,
+        peer_id: PeerId,
+        id: MessageId,
+        message: Message,
+    ) -> Result<(), Box<dyn Error>> {
+        let message_int = i32::from_le_bytes(message.data.as_slice().try_into().unwrap());
+        let message_scalar = i32_to_scalar(message_int);
+        let received_result = bv_state.received_from.get(&message_scalar);
+        let mut received: HashSet<PeerId> = HashSet::new();
+        if let Some(r) = received_result {
+            received = r.clone();
+        }
+        received.insert(peer_id);
+        println!(
+            "Got message: '{message_int}' with id: {id} from peer: {peer_id}. Have {} responses.",
+            received.len()
+        );
+        bv_state
+            .received_from
+            .insert(message_scalar, received.clone());
+        if received.len() >= (max_malicious + 1) && !bv_state.has_second_broadcasted {
+            println!("Rebroadcasting '{message_int}' to final set.");
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), message.data)
+            {
+                println!("Publish error: {e:?}");
+            } else {
+                bv_state.has_second_broadcasted = true;
+            }
+        }
+        if received.len() >= (2 * max_malicious + 1) {
+            println!("Added '{message_int}' to final set.");
+            bv_state.bin_values.insert(message_scalar);
+        }
+
+        Ok(())
+    }
+
     loop {
         select! {
             Ok(Some(line)) = stdin.next_line() => {
+                // will restart BV broadcast each time
+                bv_state.bin_values = HashSet::new();
+                bv_state.received_from = HashMap::new();
+        bv_state.has_second_broadcasted= false;
+                let int = line.to_string().parse::<i32>().unwrap();
                 if let Err(e) = swarm
                     .behaviour_mut().gossipsub
-                    .publish(topic.clone(), line.as_bytes()) {
+                    .publish(topic.clone(), int.to_le_bytes()) {
                     println!("Publish error: {e:?}");
                 }
             }
@@ -153,10 +227,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     propagation_source: peer_id,
                     message_id: id,
                     message,
-                })) => println!(
-                        "Got message: '{}' with id: {id} from peer: {peer_id}",
-                        String::from_utf8_lossy(&message.data),
-                    ),
+                })) => {
+                    handle_bv_state_receive(&mut bv_state, &mut swarm, topic.clone(), max_malicious, peer_id, id, message)?;
+                },
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
                 }
