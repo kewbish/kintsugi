@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 use util::i32_to_scalar;
 
 struct NodeState {
+    peer_id: PeerId,
     opaque_keypair: Keypair,
 }
 
@@ -59,6 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let mut state = NodeState {
+        peer_id: PeerId::random(), // temporary
         opaque_keypair: Keypair::new(),
     };
 
@@ -81,13 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let message_id_fn = |message: &gossipsub::Message| {
                 let mut hasher = Sha3_256::new();
                 hasher.update(message.data.clone());
-                hasher.update(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis()
-                        .to_le_bytes(),
-                );
+                hasher.update(message.source.unwrap().to_bytes());
                 let message_hash = hasher.finalize();
                 gossipsub::MessageId::from(format!("{:X}", message_hash))
             };
@@ -116,6 +112,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let mdns =
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
+
+            state.peer_id = key.public().to_peer_id();
 
             Ok(P2PBehaviour {
                 gossipsub,
@@ -154,7 +152,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         id: MessageId,
         message: Message,
     ) -> Result<(), Box<dyn Error>> {
-        let message_int = i32::from_le_bytes(message.data.as_slice().try_into().unwrap());
+        let message_data: Vec<u8> = message.data.as_slice().try_into().unwrap();
+        let message_int_data: [u8; 4] = message_data[1..].try_into().unwrap();
+        let message_int = i32::from_le_bytes(message_int_data);
         let message_scalar = i32_to_scalar(message_int);
         let received_result = bv_state.received_from.get(&message_scalar);
         let mut received: HashSet<PeerId> = HashSet::new();
@@ -171,17 +171,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .insert(message_scalar, received.clone());
         if received.len() >= (max_malicious + 1) && !bv_state.has_second_broadcasted {
             println!("Rebroadcasting '{message_int}' to final set.");
-            if let Err(e) = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), message.data)
-            {
+            let mut data: [u8; 5] = [0u8; 5];
+            data[0] = 1;
+            data[1..].copy_from_slice(&message_int_data);
+            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data) {
                 println!("Publish error: {e:?}");
             } else {
                 bv_state.has_second_broadcasted = true;
             }
+            bv_state.has_second_broadcasted = true;
         }
-        if received.len() >= (2 * max_malicious + 1) {
+        if received.len() >= (2 * max_malicious + 1) && bv_state.has_second_broadcasted {
             println!("Added '{message_int}' to final set.");
             bv_state.bin_values.insert(message_scalar);
         }
@@ -193,14 +193,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         select! {
             Ok(Some(line)) = stdin.next_line() => {
                 // will restart BV broadcast each time
-                bv_state.bin_values = HashSet::new();
-                bv_state.received_from = HashMap::new();
-        bv_state.has_second_broadcasted= false;
                 let int = line.to_string().parse::<i32>().unwrap();
-                if let Err(e) = swarm
+                let mut data = [0u8; 5];
+                data[1..].copy_from_slice(&int.to_le_bytes());
+                let message_id = swarm
                     .behaviour_mut().gossipsub
-                    .publish(topic.clone(), int.to_le_bytes()) {
+                    .publish(topic.clone(), data);
+                if let Err(e) = message_id {
                     println!("Publish error: {e:?}");
+                } else {
+                    bv_state.bin_values = HashSet::new();
+                let scalar = i32_to_scalar(int);
+                    bv_state.received_from = HashMap::from([(scalar, HashSet::from([state.peer_id]))]);
+                    bv_state.has_second_broadcasted = false;
                 }
             }
             event = swarm.select_next_some() => match event {
