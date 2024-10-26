@@ -28,12 +28,14 @@ use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
 use util::i32_to_scalar;
 
+#[derive(Debug, Clone)]
 struct NodeState {
     peer_id: PeerId,
     index: i32,
     opaque_keypair: Keypair,
     // hashmap of (current, wrt)
-    bv_broadcast_topics: HashMap<(PeerId, PeerId), (IdentTopic, BVBroadcastNodeState)>,
+    bv_broadcast_topics: HashMap<(PeerId, PeerId), IdentTopic>,
+    bv_broadcast_states: HashMap<i32, BVBroadcastNodeState>, // wrt → state
     known_peer_ids: HashSet<PeerId>,
 }
 
@@ -91,6 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         index: 0,
         opaque_keypair: Keypair::new(),
         bv_broadcast_topics: HashMap::new(),
+        bv_broadcast_states: HashMap::new(),
     };
 
     let max_malicious = 1;
@@ -177,37 +180,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_id: PeerId,
         id: MessageId,
         message: Message,
-    ) -> Result<(), Box<dyn Error>> {
-        let (topic, bv_state) = state
-            .bv_broadcast_topics
-            .get_mut(&(state.peer_id, peer_id))
-            .unwrap();
-
+    ) -> Result<NodeState, Box<dyn Error>> {
         let message_data: BVBroadcastMessage =
             serde_json::from_slice(message.data.as_slice()).unwrap();
 
+        let topic = state
+            .bv_broadcast_topics
+            .get(&(state.peer_id, peer_id))
+            .unwrap()
+            .clone();
+        let mut bv_state = state
+            .bv_broadcast_states
+            .entry(message_data.wrt_index)
+            .or_insert(BVBroadcastNodeState::new())
+            .clone();
         bv_state
             .received_from
             .entry(message_data.proposed_value)
             .or_insert_with(HashSet::new)
             .insert(message_data.current_index);
-        /*let received_result = bv_state.received_from.get(&message_data.proposed_value);
-        let mut received: HashSet<i32> = HashSet::new();
-        if let Some(r) = received_result {
-            received = r.clone();
-        }
-        println!("Before received_from: {:?}", bv_state.received_from);
-        received.insert(message_data.current_index);
-        bv_state
-            .received_from
-            .insert(message_data.proposed_value, received.clone());*/
-        println!("Before now received_from: {:?}", bv_state.received_from);
-
         let num_responses = bv_state
             .received_from
             .get(&message_data.proposed_value)
             .unwrap()
             .len();
+
         println!(
             "Got message: '{}' with id: {id} from peer: {peer_id}. Have {} responses.",
             String::from_utf8(message.data).unwrap(),
@@ -246,9 +243,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bv_state.bin_values.insert(message_data.proposed_value);
         }
 
-        println!("New received_from: {:?}", bv_state.received_from);
+        state
+            .bv_broadcast_states
+            .insert(message_data.wrt_index, bv_state);
 
-        Ok(())
+        Ok(state.clone())
     }
 
     fn handle_stdin(state: &mut NodeState, swarm: &mut Swarm<P2PBehaviour>, line: String) {
@@ -267,12 +266,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .unwrap();
 
-        /*println!(
-            "Current broadcast topics {:?} + known peer IDs {:?}",
-            state.bv_broadcast_topics, state.known_peer_ids
-        );*/
-
-        let (topic, _) = state
+        let topic = state
             .bv_broadcast_topics
             .get(&(state.peer_id, at_id))
             .unwrap();
@@ -305,19 +299,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     for (a, b) in combinations {
                         if let None = state.bv_broadcast_topics.get(&(b, a)) {
                             let topic = gossipsub::IdentTopic::new(format!("{}-{}", b, a));
-                            state.bv_broadcast_topics.insert((b, a), (topic.clone(), BVBroadcastNodeState::new()));
+                            state.bv_broadcast_topics.insert((b, a), topic.clone());
                             swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
                         }
                         if let None = state.bv_broadcast_topics.get(&(a, b)) {
                             let topic = gossipsub::IdentTopic::new(format!("{}-{}", a, b));
-                            state.bv_broadcast_topics.insert((a, b), (topic.clone(), BVBroadcastNodeState::new()));
+                            state.bv_broadcast_topics.insert((a, b), topic.clone());
                             swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
                         }
                     }
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::UnroutablePeer { peer })) => {
                     swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
-                    if let Some((topic, _)) = state.bv_broadcast_topics.get(&(state.peer_id, peer)) {
+                    if let Some(topic) = state.bv_broadcast_topics.get(&(state.peer_id, peer)) {
                         swarm.behaviour_mut().gossipsub.unsubscribe(&topic)?;
                     }
                     state.bv_broadcast_topics.remove(&(state.peer_id, peer));
@@ -334,12 +328,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         for (a, b) in combinations {
                             if let None = state.bv_broadcast_topics.get(&(b, a)) {
                                 let topic = gossipsub::IdentTopic::new(format!("{}-{}", b, a));
-                                state.bv_broadcast_topics.insert((b, a), (topic.clone(), BVBroadcastNodeState::new()));
+                                state.bv_broadcast_topics.insert((b, a), topic.clone());
                                 swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
                             }
                             if let None = state.bv_broadcast_topics.get(&(a, b)) {
                                 let topic = gossipsub::IdentTopic::new(format!("{}-{}", a, b));
-                                state.bv_broadcast_topics.insert((a, b), (topic.clone(), BVBroadcastNodeState::new()));
+                                state.bv_broadcast_topics.insert((a, b), topic.clone());
                                 swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
                             }
                         }
@@ -349,7 +343,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     for (peer, _multiaddr) in list {
                         println!("mDNS discover peer has expired: {peer}");
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
-                        if let Some((topic, _)) = state.bv_broadcast_topics.get(&(state.peer_id, peer)) {
+                        if let Some(topic) = state.bv_broadcast_topics.get(&(state.peer_id, peer)) {
                             swarm.behaviour_mut().gossipsub.unsubscribe(&topic)?;
                         }
                         state.bv_broadcast_topics.remove(&(state.peer_id, peer));
@@ -360,7 +354,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     message_id: id,
                     message,
                 })) => {
-                    handle_bv_state_receive(&mut state, &mut swarm, max_malicious, peer_id, id, message)?;
+                    state = handle_bv_state_receive(&mut state, &mut swarm, max_malicious, peer_id, id, message)?;
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
