@@ -34,8 +34,9 @@ struct NodeState {
     index: i32,
     opaque_keypair: Keypair,
     // hashmap of (current, wrt)
-    bv_broadcast_topics: HashMap<(PeerId, PeerId), IdentTopic>,
+    broadcast_topics: HashMap<(PeerId, PeerId), IdentTopic>,
     bv_broadcast_states: HashMap<i32, BVBroadcastNodeState>, // wrt → state
+    sbv_broadcast_states: HashMap<i32, SBVBroadcastNodeState>,
     known_peer_ids: HashSet<PeerId>,
 }
 
@@ -124,8 +125,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         known_peer_ids: HashSet::new(), // temporary
         index: 0,
         opaque_keypair: Keypair::new(),
-        bv_broadcast_topics: HashMap::new(),
+        broadcast_topics: HashMap::new(),
         bv_broadcast_states: HashMap::new(),
+        sbv_broadcast_states: HashMap::new(),
     };
 
     let max_malicious = 1;
@@ -220,7 +222,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             BroadcastMessage::BVBroadcastMessage(msg) => {
                 handle_message_bv(state, swarm, max_malicious, peer_id, id, msg)
             }
-            BroadcastMessage::SBVBroadcastMessage(msg) => Ok(state.clone()), // TODO
+            BroadcastMessage::SBVBroadcastMessage(msg) => {
+                handle_message_sbv(state, swarm, max_malicious, peer_id, id, msg)
+            }
         }
     }
 
@@ -233,7 +237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message: BVBroadcastMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
         let topic = state
-            .bv_broadcast_topics
+            .broadcast_topics
             .get(&(state.peer_id, peer_id))
             .unwrap()
             .clone();
@@ -254,7 +258,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .len();
 
         println!(
-            "Got message: '{message:?}' with id: {id} from peer: {peer_id}. Have {} responses.",
+            "[BV] Got message: '{message:?}' with id: {id} from peer: {peer_id}. Have {} responses.",
             num_responses
         );
 
@@ -288,11 +292,77 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 message.proposed_value, message.wrt_index
             );
             bv_state.bin_values.insert(message.proposed_value);
+
+            println!(
+                "Broadcasting SBV message {} wrt {}.",
+                message.proposed_value, message.wrt_index
+            );
+            let sbv_message = serde_json::to_vec(&SBVBroadcastMessage {
+                w: message.proposed_value,
+                current_index: state.index,
+                current_id: state.peer_id,
+                wrt_index: message.wrt_index,
+                wrt_id: message.wrt_id,
+            })
+            .unwrap();
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), sbv_message)
+            {
+                println!("Publish error: {e:?}");
+            }
         }
 
         state
             .bv_broadcast_states
             .insert(message.wrt_index, bv_state);
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_sbv(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        max_malicious: usize,
+        peer_id: PeerId,
+        id: MessageId,
+        message: SBVBroadcastMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let topic = state
+            .broadcast_topics
+            .get(&(state.peer_id, peer_id))
+            .unwrap()
+            .clone();
+        let mut sbv_state = state
+            .sbv_broadcast_states
+            .entry(message.wrt_index)
+            .or_insert(SBVBroadcastNodeState::new())
+            .clone();
+        sbv_state
+            .received_from
+            .entry(message.w)
+            .or_insert_with(HashSet::new)
+            .insert(message.current_index);
+        let num_responses = sbv_state.received_from.get(&message.w).unwrap().len();
+
+        println!(
+            "Got message: '{message:?}' with id: {id} from peer: {peer_id}. Have {} responses.",
+            num_responses
+        );
+
+        for (val, responses) in sbv_state.received_from.iter() {
+            if responses.len() >= state.known_peer_ids.len() - max_malicious {}
+            println!("Added '{}' to final view wrt {}.", val, message.wrt_index);
+            if let None = sbv_state.view {
+                sbv_state.view = Some(HashSet::new());
+            }
+            sbv_state.view.as_mut().unwrap().insert(val.clone());
+        }
+
+        state
+            .sbv_broadcast_states
+            .insert(message.wrt_index, sbv_state);
 
         Ok(state.clone())
     }
@@ -313,10 +383,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .unwrap();
 
-        let topic = state
-            .bv_broadcast_topics
-            .get(&(state.peer_id, at_id))
-            .unwrap();
+        let topic = state.broadcast_topics.get(&(state.peer_id, at_id)).unwrap();
         let message_id = swarm
             .behaviour_mut()
             .gossipsub
@@ -343,14 +410,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect();
         for (a, b) in combinations {
-            if let None = state.bv_broadcast_topics.get(&(b, a)) {
+            if let None = state.broadcast_topics.get(&(b, a)) {
                 let topic = gossipsub::IdentTopic::new(format!("{}-{}", b, a));
-                state.bv_broadcast_topics.insert((b, a), topic.clone());
+                state.broadcast_topics.insert((b, a), topic.clone());
                 swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
             }
-            if let None = state.bv_broadcast_topics.get(&(a, b)) {
+            if let None = state.broadcast_topics.get(&(a, b)) {
                 let topic = gossipsub::IdentTopic::new(format!("{}-{}", a, b));
-                state.bv_broadcast_topics.insert((a, b), topic.clone());
+                state.broadcast_topics.insert((a, b), topic.clone());
                 swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
             }
         }
@@ -363,10 +430,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer: PeerId,
     ) -> Result<(), Box<dyn Error>> {
         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
-        if let Some(topic) = state.bv_broadcast_topics.get(&(state.peer_id, peer)) {
+        if let Some(topic) = state.broadcast_topics.get(&(state.peer_id, peer)) {
             swarm.behaviour_mut().gossipsub.unsubscribe(&topic)?;
         }
-        state.bv_broadcast_topics.remove(&(state.peer_id, peer));
+        state.broadcast_topics.remove(&(state.peer_id, peer));
         Ok(())
     }
 
