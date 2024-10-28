@@ -11,23 +11,21 @@ mod util;
 mod zkp;
 
 use coin::Coin;
-use curve25519_dalek::Scalar;
 use futures::prelude::*;
 use itertools::Itertools;
 use keypair::Keypair;
-use libp2p::gossipsub::{IdentTopic, Message, MessageId, Topic};
+use libp2p::gossipsub::{IdentTopic, Message, MessageId};
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{gossipsub, identify, kad, mdns, Multiaddr, PeerId, Swarm};
+use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::str::FromStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
-use util::i32_to_scalar;
 
 #[derive(Debug, Clone)]
 struct NodeState {
@@ -140,7 +138,6 @@ struct ABANewRoundMessage {
 struct ABASBVReturnMessage {
     view: HashSet<bool>,
     bin_values: HashSet<bool>,
-    is_first_broadcast: bool,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -150,7 +147,6 @@ struct ABASBVReturnMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct ABAAuxsetMessage {
     view: HashSet<bool>,
-    is_first_broadcast: bool,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -163,6 +159,7 @@ enum BroadcastMessage {
     SBVBroadcastMessage(SBVBroadcastMessage),
     ABANewRoundMessage(ABANewRoundMessage),
     ABASBVReturnMessage(ABASBVReturnMessage),
+    ABAAuxsetMessage(ABAAuxsetMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -288,16 +285,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         match message_data {
             BroadcastMessage::BVBroadcastMessage(msg) => {
-                handle_message_bv(state, swarm, max_malicious, peer_id, id, msg)
+                handle_message_bv(state, swarm, max_malicious, peer_id, msg)
             }
             BroadcastMessage::SBVBroadcastMessage(msg) => {
-                handle_message_sbv(state, swarm, max_malicious, peer_id, id, msg)
+                handle_message_sbv(state, swarm, max_malicious, peer_id, msg)
             }
             BroadcastMessage::ABANewRoundMessage(msg) => {
-                handle_message_aba_new_round(state, swarm, peer_id, id, msg)
+                handle_message_aba_new_round(state, swarm, peer_id, msg)
             }
             BroadcastMessage::ABASBVReturnMessage(msg) => {
-                handle_message_aba_sbv_return(state, swarm, max_malicious, peer_id, id, msg)
+                handle_message_aba_sbv_return(state, swarm, peer_id, msg)
+            }
+            BroadcastMessage::ABAAuxsetMessage(msg) => {
+                handle_message_aba_auxset(state, swarm, max_malicious, peer_id, msg)
             }
         }
     }
@@ -307,7 +307,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         max_malicious: usize,
         peer_id: PeerId,
-        id: MessageId,
         message: BVBroadcastMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
         let topic = state
@@ -332,7 +331,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .len();
 
         println!(
-            "[BV] Got message: '{message:?}' with id: {id} from peer: {peer_id}. Have {} responses.",
+            "[BV] Got message: '{message:?}' from peer: {peer_id}. Have {} responses.",
             num_responses
         );
 
@@ -400,7 +399,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         max_malicious: usize,
         peer_id: PeerId,
-        id: MessageId,
         message: SBVBroadcastMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
         let topic = state
@@ -421,7 +419,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let num_responses = sbv_state.received_from.get(&message.w).unwrap().len();
 
         println!(
-            "Got message: '{message:?}' with id: {id} from peer: {peer_id}. Have {} responses.",
+            "[SBV] Got message: '{message:?}' from peer: {peer_id}. Have {} responses.",
             num_responses
         );
 
@@ -452,7 +450,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let aba_sbv_return_message = serde_json::to_vec(&ABASBVReturnMessage {
                 view: sbv_state.view.unwrap(),
                 bin_values: sbv_state.bin_values,
-                is_first_broadcast: true,
                 current_index: state.index,
                 current_id: state.peer_id,
                 wrt_index: message.wrt_index,
@@ -480,7 +477,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
-        id: MessageId,
         message: ABANewRoundMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
         let topic = state
@@ -529,9 +525,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn handle_message_aba_sbv_return(
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
-        max_malicious: usize,
         peer_id: PeerId,
-        id: MessageId,
         message: ABASBVReturnMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
         let mut aba_state = state
@@ -542,12 +536,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         aba_state.sbv_broadcast_bin_values_1 = message.bin_values;
 
-        if aba_state.round_phase != ABANodeStateViewNum::One {
-            aba_state.round_phase = ABANodeStateViewNum::Two;
+        if aba_state.round_phase == ABANodeStateViewNum::Two {
             let mut should_continue = true;
             if message.view.len() == 1 {
                 let final_value = message.view.iter().next();
                 if let Some(fv) = final_value {
+                    println!(
+                        "Decided on final value {fv} for ABA wrt {}",
+                        message.wrt_index
+                    );
                     aba_state.final_value = Some(fv.clone());
                     aba_state.est = Some(fv.clone());
                     should_continue = false;
@@ -590,7 +587,99 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         } else {
-            // TODO - ABAAuxsetMessage
+            let topic = state
+                .broadcast_topics
+                .get(&(state.peer_id, peer_id))
+                .unwrap();
+            let auxset_message = serde_json::to_vec(&ABAAuxsetMessage {
+                view: message.view,
+                current_index: state.index,
+                current_id: state.peer_id,
+                wrt_index: message.wrt_index,
+                wrt_id: message.wrt_id,
+            })
+            .unwrap();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), auxset_message);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!(
+                    "Moving to final ABA phase in round {} for node index {}",
+                    aba_state.round_num, message.wrt_index
+                );
+                aba_state.round_phase = ABANodeStateViewNum::One;
+            }
+        }
+
+        state.aba_states.insert(message.wrt_index, aba_state);
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_aba_auxset(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        max_malicious: usize,
+        peer_id: PeerId,
+        message: ABAAuxsetMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let topic = state
+            .broadcast_topics
+            .get(&(state.peer_id, peer_id))
+            .unwrap()
+            .clone();
+        let mut aba_state = state
+            .aba_states
+            .entry(message.wrt_index)
+            .or_insert(ABANodeState::new())
+            .clone();
+        for element in message.view.iter() {
+            aba_state
+                .received_from
+                .entry(element.clone())
+                .or_insert_with(HashSet::new)
+                .insert(message.current_index);
+        }
+
+        println!("[ABA AUXSET] Got message: '{message:?}' from peer: {peer_id}.",);
+
+        let mut view = HashSet::new();
+        for (val, responses) in aba_state.received_from.iter() {
+            if responses.len() >= state.known_peer_ids.len() - max_malicious
+                && aba_state.sbv_broadcast_bin_values_1.contains(val)
+            {
+                println!("Added '{}' to final view wrt {}.", val, message.wrt_index);
+                view.insert(val.clone());
+            }
+        }
+
+        if view.len() > 0 {
+            println!("Moving to ABA phase 1 decision wrt {}.", message.wrt_index);
+            if view.len() == 1 {
+                aba_state.est = Some(view.iter().next().unwrap().clone());
+            } else {
+                aba_state.est = Some(false);
+            }
+            let bv_message = serde_json::to_vec(&BVBroadcastMessage {
+                proposed_value: aba_state.est.unwrap(),
+                current_index: state.index,
+                current_id: state.peer_id,
+                wrt_index: message.wrt_index,
+                wrt_id: message.wrt_id,
+            })
+            .unwrap();
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), bv_message)
+            {
+                println!("Publish error: {e:?}");
+            } else {
+                aba_state.round_phase = ABANodeStateViewNum::Two;
+            }
         }
 
         state.aba_states.insert(message.wrt_index, aba_state);
