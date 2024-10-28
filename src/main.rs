@@ -10,6 +10,7 @@ mod signature;
 mod util;
 mod zkp;
 
+use coin::Coin;
 use curve25519_dalek::Scalar;
 use futures::prelude::*;
 use itertools::Itertools;
@@ -75,25 +76,34 @@ impl SBVBroadcastNodeState {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum ABANodeStateViewNum {
+    Zero,
+    One,
+    Two,
+}
+
 #[derive(Debug, Clone)]
 struct ABANodeState {
     round_num: i32,
-    est: bool,
+    est: Option<bool>,
     views: HashMap<(bool, i32), HashSet<bool>>,
-    final_value: Option<bool>,
     received_from: HashMap<bool, HashSet<i32>>,
     sbv_broadcast_bin_values_1: HashSet<bool>,
+    final_value: Option<bool>,
+    round_phase: ABANodeStateViewNum,
 }
 
 impl ABANodeState {
     fn new() -> Self {
         ABANodeState {
             round_num: 0,
-            est: false,
+            est: None,
             views: HashMap::new(),
             final_value: None,
             received_from: HashMap::new(),
             sbv_broadcast_bin_values_1: HashSet::new(),
+            round_phase: ABANodeStateViewNum::Zero,
         }
     }
 }
@@ -130,7 +140,7 @@ struct ABANewRoundMessage {
 struct ABASBVReturnMessage {
     view: HashSet<bool>,
     bin_values: HashSet<bool>,
-    round_num: i32,
+    is_first_broadcast: bool,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -152,6 +162,7 @@ enum BroadcastMessage {
     BVBroadcastMessage(BVBroadcastMessage),
     SBVBroadcastMessage(SBVBroadcastMessage),
     ABANewRoundMessage(ABANewRoundMessage),
+    ABASBVReturnMessage(ABASBVReturnMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -285,6 +296,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             BroadcastMessage::ABANewRoundMessage(msg) => {
                 handle_message_aba_new_round(state, swarm, peer_id, id, msg)
             }
+            BroadcastMessage::ABASBVReturnMessage(msg) => {
+                handle_message_aba_sbv_return(state, swarm, max_malicious, peer_id, id, msg)
+            }
         }
     }
 
@@ -389,6 +403,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         id: MessageId,
         message: SBVBroadcastMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
+        let topic = state
+            .broadcast_topics
+            .get(&(state.peer_id, peer_id))
+            .unwrap()
+            .clone();
         let mut sbv_state = state
             .sbv_broadcast_states
             .entry(message.wrt_index)
@@ -406,6 +425,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             num_responses
         );
 
+        let mut final_view_modified = false;
         for (val, responses) in sbv_state.received_from.iter() {
             if responses.len() >= state.known_peer_ids.len() - max_malicious {}
             println!("Added '{}' to final view wrt {}.", val, message.wrt_index);
@@ -413,6 +433,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 sbv_state.view = Some(HashSet::new());
             }
             sbv_state.view.as_mut().unwrap().insert(val.clone());
+            final_view_modified = true;
+        }
+
+        if final_view_modified {
+            let sbv_state = sbv_state.clone();
+            let aba_state = state
+                .aba_states
+                .entry(message.wrt_index)
+                .or_insert(ABANodeState::new())
+                .clone();
+            println!(
+                "Broadcasting ABA SBV return round {} w view {:?} wrt {}.",
+                aba_state.round_num,
+                sbv_state.view.as_ref().unwrap(),
+                message.wrt_index
+            );
+            let aba_sbv_return_message = serde_json::to_vec(&ABASBVReturnMessage {
+                view: sbv_state.view.unwrap(),
+                bin_values: sbv_state.bin_values,
+                is_first_broadcast: true,
+                current_index: state.index,
+                current_id: state.peer_id,
+                wrt_index: message.wrt_index,
+                wrt_id: message.wrt_id,
+            })
+            .unwrap();
+
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), aba_sbv_return_message)
+            {
+                println!("Publish error: {e:?}");
+            }
         }
 
         state
@@ -441,14 +495,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .clone();
 
         aba_state.round_num += 1;
+        if let None = aba_state.est {
+            aba_state.est = Some(message.v);
+        }
         aba_state.received_from = HashMap::new();
+        aba_state.round_phase = ABANodeStateViewNum::Zero;
 
         println!(
             "Broadcasting ABA new round {} w message {} wrt {}.",
             aba_state.round_num, message.v, message.wrt_index
         );
         let sbv_message = serde_json::to_vec(&SBVBroadcastMessage {
-            w: message.v,
+            w: aba_state.est.unwrap(),
             current_index: state.index,
             current_id: state.peer_id,
             wrt_index: message.wrt_index,
@@ -461,6 +519,78 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .publish(topic.clone(), sbv_message)
         {
             println!("Publish error: {e:?}");
+        }
+
+        state.aba_states.insert(message.wrt_index, aba_state);
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_aba_sbv_return(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        max_malicious: usize,
+        peer_id: PeerId,
+        id: MessageId,
+        message: ABASBVReturnMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let mut aba_state = state
+            .aba_states
+            .entry(message.wrt_index)
+            .or_insert(ABANodeState::new())
+            .clone();
+
+        aba_state.sbv_broadcast_bin_values_1 = message.bin_values;
+
+        if aba_state.round_phase != ABANodeStateViewNum::One {
+            aba_state.round_phase = ABANodeStateViewNum::Two;
+            let mut should_continue = true;
+            if message.view.len() == 1 {
+                let final_value = message.view.iter().next();
+                if let Some(fv) = final_value {
+                    aba_state.final_value = Some(fv.clone());
+                    aba_state.est = Some(fv.clone());
+                    should_continue = false;
+                } else {
+                    aba_state.est = Some(Coin::get_value(
+                        state.opaque_keypair.clone(),
+                        message.wrt_index,
+                        aba_state.round_num as usize,
+                    ));
+                }
+            } else {
+                aba_state.est = Some(true); // if the other value is false, then v must be true
+            }
+
+            if should_continue {
+                let new_round_message = serde_json::to_vec(&ABANewRoundMessage {
+                    v: aba_state.est.unwrap(),
+                    round_num: aba_state.round_num,
+                    current_index: state.index,
+                    current_id: state.peer_id,
+                    wrt_index: message.wrt_index,
+                    wrt_id: message.wrt_id,
+                })
+                .unwrap();
+                let topic = state
+                    .broadcast_topics
+                    .get(&(state.peer_id, peer_id))
+                    .unwrap();
+                let message_id = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic.clone(), new_round_message);
+                if let Err(e) = message_id {
+                    println!("Publish error: {e:?}");
+                } else {
+                    println!(
+                        "Moving to next ABA round for node index {}",
+                        message.wrt_index
+                    );
+                }
+            }
+        } else {
+            // TODO - ABAAuxsetMessage
         }
 
         state.aba_states.insert(message.wrt_index, aba_state);
