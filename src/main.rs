@@ -151,6 +151,7 @@ struct ABAAuxsetMessage {
 enum BroadcastMessage {
     BVBroadcastMessage(BVBroadcastMessage),
     SBVBroadcastMessage(SBVBroadcastMessage),
+    ABANewRoundMessage(ABANewRoundMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -281,6 +282,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             BroadcastMessage::SBVBroadcastMessage(msg) => {
                 handle_message_sbv(state, swarm, max_malicious, peer_id, id, msg)
             }
+            BroadcastMessage::ABANewRoundMessage(msg) => {
+                handle_message_aba_new_round(state, swarm, peer_id, id, msg)
+            }
         }
     }
 
@@ -385,11 +389,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         id: MessageId,
         message: SBVBroadcastMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
-        let topic = state
-            .broadcast_topics
-            .get(&(state.peer_id, peer_id))
-            .unwrap()
-            .clone();
         let mut sbv_state = state
             .sbv_broadcast_states
             .entry(message.wrt_index)
@@ -423,6 +422,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(state.clone())
     }
 
+    fn handle_message_aba_new_round(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        id: MessageId,
+        message: ABANewRoundMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let topic = state
+            .broadcast_topics
+            .get(&(state.peer_id, peer_id))
+            .unwrap()
+            .clone();
+        let mut aba_state = state
+            .aba_states
+            .entry(message.wrt_index)
+            .or_insert(ABANodeState::new())
+            .clone();
+
+        aba_state.round_num += 1;
+        aba_state.received_from = HashMap::new();
+
+        println!(
+            "Broadcasting ABA new round {} w message {} wrt {}.",
+            aba_state.round_num, message.v, message.wrt_index
+        );
+        let sbv_message = serde_json::to_vec(&SBVBroadcastMessage {
+            w: message.v,
+            current_index: state.index,
+            current_id: state.peer_id,
+            wrt_index: message.wrt_index,
+            wrt_id: message.wrt_id,
+        })
+        .unwrap();
+        if let Err(e) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), sbv_message)
+        {
+            println!("Publish error: {e:?}");
+        }
+
+        state.aba_states.insert(message.wrt_index, aba_state);
+
+        Ok(state.clone())
+    }
+
     fn handle_stdin(state: &mut NodeState, swarm: &mut Swarm<P2PBehaviour>, line: String) {
         let parts: Vec<&str> = line.split_whitespace().collect(); // index + proposal +
                                                                   // index_peer_id
@@ -430,8 +475,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let at_index = parts[0].parse::<i32>().unwrap();
         let at_id = PeerId::from_str(parts[2]).unwrap();
 
-        let init_message = serde_json::to_vec(&BVBroadcastMessage {
-            proposed_value: proposal != 0,
+        let init_message = serde_json::to_vec(&ABANewRoundMessage {
+            v: proposal != 0,
+            round_num: 0,
             current_index: state.index,
             current_id: state.peer_id,
             wrt_index: at_index,
