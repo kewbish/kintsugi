@@ -37,6 +37,7 @@ struct NodeState {
     broadcast_topics: HashMap<(PeerId, PeerId), IdentTopic>,
     bv_broadcast_states: HashMap<i32, BVBroadcastNodeState>, // wrt → state
     sbv_broadcast_states: HashMap<i32, SBVBroadcastNodeState>,
+    aba_states: HashMap<i32, ABANodeState>,
     known_peer_ids: HashSet<PeerId>,
 }
 
@@ -74,6 +75,29 @@ impl SBVBroadcastNodeState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ABANodeState {
+    round_num: i32,
+    est: bool,
+    views: HashMap<(bool, i32), HashSet<bool>>,
+    final_value: Option<bool>,
+    received_from: HashMap<bool, HashSet<i32>>,
+    sbv_broadcast_bin_values_1: HashSet<bool>,
+}
+
+impl ABANodeState {
+    fn new() -> Self {
+        ABANodeState {
+            round_num: 0,
+            est: false,
+            views: HashMap::new(),
+            final_value: None,
+            received_from: HashMap::new(),
+            sbv_broadcast_bin_values_1: HashSet::new(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct BVBroadcastMessage {
     proposed_value: bool,
@@ -86,6 +110,37 @@ struct BVBroadcastMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct SBVBroadcastMessage {
     w: bool,
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ABANewRoundMessage {
+    v: bool,
+    round_num: i32,
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ABASBVReturnMessage {
+    view: HashSet<bool>,
+    bin_values: HashSet<bool>,
+    round_num: i32,
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ABAAuxsetMessage {
+    view: HashSet<bool>,
+    is_first_broadcast: bool,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -128,6 +183,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         broadcast_topics: HashMap::new(),
         bv_broadcast_states: HashMap::new(),
         sbv_broadcast_states: HashMap::new(),
+        aba_states: HashMap::new(),
     };
 
     let max_malicious = 1;
