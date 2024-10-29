@@ -14,6 +14,7 @@ use acss::{ACSSDealerShare, ACSSInputs, ACSSNodeShare, ACSS};
 use coin::Coin;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::{RistrettoPoint, Scalar};
+use dkg::DKG;
 use futures::prelude::*;
 use itertools::Itertools;
 use keypair::{Keypair, PublicKey};
@@ -21,6 +22,7 @@ use libp2p::gossipsub::{IdentTopic, Message, MessageId};
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
+use polynomial::Polynomial;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -30,6 +32,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
+use util::i32_to_scalar;
 
 // --- state structs --- //
 
@@ -39,6 +42,7 @@ struct NodeState {
     index: i32,
     opaque_keypair: Keypair,
     known_peer_ids: HashSet<PeerId>,
+    peer_id_to_index: HashMap<PeerId, i32>,
     // hashmap of (current, wrt)
     broadcast_topics: HashMap<(PeerId, PeerId), IdentTopic>,
     bv_broadcast_states: HashMap<i32, BVBroadcastNodeState>, // wrt → state
@@ -119,6 +123,12 @@ struct DKGNodeState {
     secret_share_a: Option<ACSSNodeShare>,
     secret_share_b: Option<ACSSNodeShare>,
     s_finished: HashSet<i32>,
+    phi_a: Option<Polynomial>,
+    phi_hat_a: Option<Polynomial>,
+    phi_b: Option<Polynomial>,
+    phi_hat_b: Option<Polynomial>,
+    z_shares: Option<Vec<Scalar>>,
+    z_hat_shares: Option<Vec<Scalar>>,
 }
 
 impl DKGNodeState {
@@ -127,11 +137,22 @@ impl DKGNodeState {
             secret_share_a: None,
             secret_share_b: None,
             s_finished: HashSet::new(),
+            phi_a: None,
+            phi_b: None,
+            phi_hat_a: None,
+            phi_hat_b: None,
+            z_shares: None,
+            z_hat_shares: None,
         }
     }
 }
 
 // --- message structs --- //
+
+#[derive(Serialize, Deserialize, Debug)]
+struct IdIndexMessage {
+    index: i32,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BVBroadcastMessage {
@@ -201,8 +222,18 @@ struct ACSSAckMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct DKGProposalMessage {
-    proposed_committee: HashSet<i32>,
+struct DKGAgreementMessage {
+    t: HashSet<i32>, // TODO - should be taking this once ABAs are completed
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DKGRandExtMessage {
+    z_share: Scalar,
+    z_hat_share: Scalar,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -211,6 +242,7 @@ struct DKGProposalMessage {
 
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
+    IdIndexMessage(IdIndexMessage),
     BVBroadcastMessage(BVBroadcastMessage),
     SBVBroadcastMessage(SBVBroadcastMessage),
     ABANewRoundMessage(ABANewRoundMessage),
@@ -218,6 +250,7 @@ enum BroadcastMessage {
     ABAAuxsetMessage(ABAAuxsetMessage),
     ACSSShareMessage(ACSSShareMessage),
     ACSSAckMessage(ACSSAckMessage),
+    DKGAgreementMessage(DKGAgreementMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -243,8 +276,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let mut state = NodeState {
-        peer_id: PeerId::random(),      // temporary
-        known_peer_ids: HashSet::new(), // temporary
+        peer_id: PeerId::random(),        // temp
+        known_peer_ids: HashSet::new(),   // temp
+        peer_id_to_index: HashMap::new(), // temp
         index: 0,
         opaque_keypair: Keypair::new(),
         broadcast_topics: HashMap::new(),
@@ -260,6 +294,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let max_malicious = 1;
+    let threshold = 3;
 
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -304,6 +339,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             state.peer_id = key.public().to_peer_id();
             state.known_peer_ids = HashSet::from([state.peer_id]);
+            state.peer_id_to_index = HashMap::from([(state.peer_id, state.index)]);
 
             Ok(P2PBehaviour {
                 gossipsub,
@@ -340,6 +376,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         max_malicious: usize,
+        threshold: usize,
         peer_id: PeerId,
         id: MessageId,
         message: Message,
@@ -348,6 +385,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             serde_json::from_slice(message.data.as_slice()).unwrap();
 
         match message_data {
+            BroadcastMessage::IdIndexMessage(msg) => {
+                state.peer_id_to_index.insert(peer_id, msg.index);
+                Ok(state.clone())
+            }
             BroadcastMessage::BVBroadcastMessage(msg) => {
                 handle_message_bv(state, swarm, max_malicious, peer_id, msg)
             }
@@ -368,6 +409,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::ACSSAckMessage(msg) => {
                 handle_message_acss_ack(state, swarm, max_malicious, peer_id, msg)
+            }
+            BroadcastMessage::DKGAgreementMessage(msg) => {
+                handle_message_dkg_agreement(state, swarm, threshold, peer_id, msg)
             }
         }
     }
@@ -829,27 +873,69 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .insert(message.wrt_index, dkg_state.clone());
 
         if dkg_state.s_finished.len() >= state.known_peer_ids.len() - max_malicious {
+            // TODO - initialize the n ABA instances
+        }
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_dkg_agreement(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        threshold: usize,
+        peer_id: PeerId,
+        message: DKGAgreementMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let mut dkg_state = state
+            .dkg_states
+            .entry(message.wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        let agreements = DKG::agreement_vec(
+            message
+                .t
+                .iter()
+                .map(|int| i32_to_scalar(int.clone()))
+                .collect(),
+            dkg_state.phi_a.as_ref().unwrap().clone(),
+            dkg_state.phi_hat_a.as_ref().unwrap().clone(),
+            dkg_state.phi_b.as_ref().unwrap().clone(),
+            dkg_state.phi_hat_b.as_ref().unwrap().clone(),
+            state.acss_inputs.h_point,
+            state.known_peer_ids.len(),
+        );
+
+        let (z_shares, z_hat_shares) =
+            DKG::randomness_extraction(threshold, agreements, state.known_peer_ids.len());
+        dkg_state.z_shares = Some(z_shares.clone());
+        dkg_state.z_hat_shares = Some(z_hat_shares.clone());
+        state
+            .dkg_states
+            .insert(message.wrt_index, dkg_state.clone());
+
+        for wrt_id in state.known_peer_ids.iter() {
             let topic = state
                 .broadcast_topics
-                .get(&(state.peer_id, peer_id))
-                .unwrap()
-                .clone();
-            let acss_share_message = serde_json::to_vec(&DKGProposalMessage {
-                proposed_committee: dkg_state.s_finished,
+                .get(&(state.peer_id, wrt_id.clone()))
+                .unwrap();
+            let wrt_index = state.peer_id_to_index.get(wrt_id).unwrap().clone();
+            let init_message = serde_json::to_vec(&DKGRandExtMessage {
+                z_share: z_shares[wrt_index as usize],
+                z_hat_share: z_hat_shares[wrt_index as usize],
                 current_index: state.index,
                 current_id: state.peer_id,
-                wrt_index: message.wrt_index,
-                wrt_id: message.wrt_id,
+                wrt_index,
+                wrt_id: wrt_id.clone(),
             })
             .unwrap();
-            if let Err(e) = swarm
+            let message_id = swarm
                 .behaviour_mut()
                 .gossipsub
-                .publish(topic.clone(), acss_share_message)
-            {
+                .publish(topic.clone(), init_message);
+            if let Err(e) = message_id {
                 println!("Publish error: {e:?}");
             } else {
-                println!("[ACSS] Finished share, moving to DKG agreement proposal");
+                println!("[DKG] Sending RANDEX message to index {wrt_index}");
             }
         }
 
@@ -891,18 +977,47 @@ async fn main() -> Result<(), Box<dyn Error>> {
         wrt_index: i32,
         wrt_id: PeerId,
     ) -> Result<NodeState, Box<dyn Error>> {
+        for peer_id in state.known_peer_ids.iter() {
+            let topic = state
+                .broadcast_topics
+                .get(&(state.peer_id, peer_id.clone()))
+                .unwrap();
+            let index_message = serde_json::to_vec(&IdIndexMessage { index: state.index }).unwrap();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), index_message);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!("[INIT] Sending peer ID/index setup message");
+            }
+        }
+
+        let (a, b) = DKG::share();
         let (a_acss_dealer_share, phi_a, phi_hat_a) = ACSS::share_dealer(
             state.acss_inputs.clone(),
-            Scalar::random(&mut OsRng),
+            a,
             state.acss_inputs.degree,
             state.opaque_keypair.private_key,
         )?;
         let (b_acss_dealer_share, phi_b, phi_hat_b) = ACSS::share_dealer(
             state.acss_inputs.clone(),
-            Scalar::random(&mut OsRng),
+            b,
             state.acss_inputs.degree,
             state.opaque_keypair.private_key,
         )?;
+
+        let mut dkg_state = state
+            .dkg_states
+            .entry(wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        dkg_state.phi_a = Some(phi_a);
+        dkg_state.phi_b = Some(phi_b);
+        dkg_state.phi_hat_a = Some(phi_hat_a);
+        dkg_state.phi_hat_b = Some(phi_hat_b);
+        state.dkg_states.insert(wrt_index, dkg_state.clone());
 
         let topic = state
             .broadcast_topics
@@ -1008,7 +1123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     message_id: id,
                     message,
                 })) => {
-                    state = handle_message(&mut state, &mut swarm, max_malicious, peer_id, id, message)?;
+                    state = handle_message(&mut state, &mut swarm, max_malicious, threshold, peer_id, id, message)?;
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
