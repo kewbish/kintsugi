@@ -118,7 +118,7 @@ impl ABANodeState {
 struct DKGNodeState {
     secret_share_a: Option<ACSSNodeShare>,
     secret_share_b: Option<ACSSNodeShare>,
-    s_received_from: HashMap<i32, HashSet<i32>>,
+    s_finished: HashSet<i32>,
 }
 
 impl DKGNodeState {
@@ -126,7 +126,7 @@ impl DKGNodeState {
         DKGNodeState {
             secret_share_a: None,
             secret_share_b: None,
-            s_received_from: HashMap::new(),
+            s_finished: HashSet::new(),
         }
     }
 }
@@ -200,6 +200,15 @@ struct ACSSAckMessage {
     wrt_id: PeerId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct DKGProposalMessage {
+    proposed_committee: HashSet<i32>,
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     BVBroadcastMessage(BVBroadcastMessage),
@@ -208,6 +217,7 @@ enum BroadcastMessage {
     ABASBVReturnMessage(ABASBVReturnMessage),
     ABAAuxsetMessage(ABAAuxsetMessage),
     ACSSShareMessage(ACSSShareMessage),
+    ACSSAckMessage(ACSSAckMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -355,6 +365,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::ACSSShareMessage(msg) => {
                 handle_message_acss_share(state, swarm, peer_id, msg)
+            }
+            BroadcastMessage::ACSSAckMessage(msg) => {
+                handle_message_acss_ack(state, swarm, max_malicious, peer_id, msg)
             }
         }
     }
@@ -777,8 +790,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .unwrap()
             .clone();
         let acss_share_message = serde_json::to_vec(&ACSSAckMessage {
-            current_index: message.current_index,
-            current_id: message.current_id,
+            current_index: state.index,
+            current_id: state.peer_id,
             wrt_index: message.wrt_index,
             wrt_id: message.wrt_id,
         })
@@ -794,6 +807,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         state.dkg_states.insert(message.wrt_index, dkg_state);
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_acss_ack(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        max_malicious: usize,
+        peer_id: PeerId,
+        message: ACSSAckMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let mut dkg_state = state
+            .dkg_states
+            .entry(message.wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        dkg_state.s_finished.insert(message.current_index);
+        state
+            .dkg_states
+            .insert(message.wrt_index, dkg_state.clone());
+
+        if dkg_state.s_finished.len() >= state.known_peer_ids.len() - max_malicious {
+            let topic = state
+                .broadcast_topics
+                .get(&(state.peer_id, peer_id))
+                .unwrap()
+                .clone();
+            let acss_share_message = serde_json::to_vec(&DKGProposalMessage {
+                proposed_committee: dkg_state.s_finished,
+                current_index: state.index,
+                current_id: state.peer_id,
+                wrt_index: message.wrt_index,
+                wrt_id: message.wrt_id,
+            })
+            .unwrap();
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), acss_share_message)
+            {
+                println!("Publish error: {e:?}");
+            } else {
+                println!("[ACSS] Finished share, moving to DKG agreement proposal");
+            }
+        }
 
         Ok(state.clone())
     }
