@@ -3,7 +3,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZKP {
     // does not prove knowledge under encryption but verifies commitment
     pub(crate) A: RistrettoPoint,

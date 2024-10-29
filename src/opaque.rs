@@ -4,6 +4,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
+use derive_more::Display;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha3::{Digest, Sha3_256};
@@ -12,11 +13,17 @@ use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
 
 type CS = voprf::Ristretto255;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Display)]
 pub enum P2POpaqueError {
     RegistrationError,
     CryptoError(String),
     SerializationError(String),
+}
+
+impl std::error::Error for P2POpaqueError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

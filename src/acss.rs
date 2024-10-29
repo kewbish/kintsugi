@@ -10,6 +10,7 @@ use curve25519_dalek::{
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     keypair::{Keypair, PrivateKey, PublicKey},
@@ -18,34 +19,34 @@ use crate::{
     zkp::ZKP,
 };
 
-struct ACSS {}
+pub struct ACSS {}
 
-#[derive(Clone)]
-struct ACSSInputs {
-    h_point: RistrettoPoint,
-    degree: usize,
-    peer_public_keys: HashMap<String, PublicKey>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ACSSInputs {
+    pub(crate) h_point: RistrettoPoint,
+    pub(crate) degree: usize,
+    pub(crate) peer_public_keys: HashMap<String, PublicKey>,
 }
 
-#[derive(Clone)]
-struct ACSSDealerShare {
-    index: usize,
-    nonce: [u8; 12],
-    v_i: Vec<u8>,
-    v_hat_i: Vec<u8>,
-    c_i: RistrettoPoint,
-    proof: ZKP,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ACSSDealerShare {
+    pub(crate) index: usize,
+    pub(crate) nonce: [u8; 12],
+    pub(crate) v_i: Vec<u8>,
+    pub(crate) v_hat_i: Vec<u8>,
+    pub(crate) c_i: RistrettoPoint,
+    pub(crate) proof: ZKP,
 }
 
-#[derive(Clone)]
-struct ACSSNodeShare {
-    s_i_d: Scalar,
-    s_hat_i_d: Scalar,
-    c_i: RistrettoPoint,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ACSSNodeShare {
+    pub(crate) s_i_d: Scalar,
+    pub(crate) s_hat_i_d: Scalar,
+    pub(crate) c_i: RistrettoPoint,
 }
 
 impl ACSS {
-    fn share_dealer(
+    pub fn share_dealer(
         inputs: ACSSInputs,
         secret: Scalar,
         degree: usize,
@@ -112,7 +113,7 @@ impl ACSS {
         Ok((shares, phi, phi_hat))
     }
 
-    fn share(
+    pub fn share(
         inputs: ACSSInputs,
         share: ACSSDealerShare,
         keypair: Keypair,
@@ -128,7 +129,7 @@ impl ACSS {
         let dealer_public_key_point = CompressedRistretto::from_slice(&dealer_key);
         if let Err(e) = dealer_public_key_point {
             return Err(P2POpaqueError::SerializationError(
-                "Error deserializing public key".to_string(),
+                "Error deserializing public key ".to_string() + &e.to_string(),
             ));
         }
         let dealer_public_key_point = dealer_public_key_point.unwrap().decompress();

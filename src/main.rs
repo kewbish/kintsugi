@@ -10,14 +10,18 @@ mod signature;
 mod util;
 mod zkp;
 
+use acss::{ACSSDealerShare, ACSSInputs, ACSSNodeShare, ACSS};
 use coin::Coin;
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::{RistrettoPoint, Scalar};
 use futures::prelude::*;
 use itertools::Itertools;
-use keypair::Keypair;
+use keypair::{Keypair, PublicKey};
 use libp2p::gossipsub::{IdentTopic, Message, MessageId};
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
@@ -27,17 +31,21 @@ use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
 
+// --- state structs --- //
+
 #[derive(Debug, Clone)]
 struct NodeState {
     peer_id: PeerId,
     index: i32,
     opaque_keypair: Keypair,
+    known_peer_ids: HashSet<PeerId>,
     // hashmap of (current, wrt)
     broadcast_topics: HashMap<(PeerId, PeerId), IdentTopic>,
     bv_broadcast_states: HashMap<i32, BVBroadcastNodeState>, // wrt → state
     sbv_broadcast_states: HashMap<i32, SBVBroadcastNodeState>,
     aba_states: HashMap<i32, ABANodeState>,
-    known_peer_ids: HashSet<PeerId>,
+    dkg_states: HashMap<i32, DKGNodeState>,
+    acss_inputs: ACSSInputs,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +114,25 @@ impl ABANodeState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DKGNodeState {
+    secret_share_a: Option<ACSSNodeShare>,
+    secret_share_b: Option<ACSSNodeShare>,
+    s_received_from: HashMap<i32, HashSet<i32>>,
+}
+
+impl DKGNodeState {
+    fn new() -> Self {
+        DKGNodeState {
+            secret_share_a: None,
+            secret_share_b: None,
+            s_received_from: HashMap::new(),
+        }
+    }
+}
+
+// --- message structs --- //
+
 #[derive(Serialize, Deserialize, Debug)]
 struct BVBroadcastMessage {
     proposed_value: bool,
@@ -153,6 +180,26 @@ struct ABAAuxsetMessage {
     wrt_id: PeerId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ACSSShareMessage {
+    inputs: ACSSInputs,
+    dealer_share_a: ACSSDealerShare,
+    dealer_share_b: ACSSDealerShare,
+    dealer_key: PublicKey,
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ACSSAckMessage {
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     BVBroadcastMessage(BVBroadcastMessage),
@@ -160,6 +207,7 @@ enum BroadcastMessage {
     ABANewRoundMessage(ABANewRoundMessage),
     ABASBVReturnMessage(ABASBVReturnMessage),
     ABAAuxsetMessage(ABAAuxsetMessage),
+    ACSSShareMessage(ACSSShareMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -193,6 +241,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bv_broadcast_states: HashMap::new(),
         sbv_broadcast_states: HashMap::new(),
         aba_states: HashMap::new(),
+        dkg_states: HashMap::new(),
+        acss_inputs: ACSSInputs {
+            h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
+            degree: 1,
+            peer_public_keys: HashMap::new(),
+        },
     };
 
     let max_malicious = 1;
@@ -298,6 +352,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::ABAAuxsetMessage(msg) => {
                 handle_message_aba_auxset(state, swarm, max_malicious, peer_id, msg)
+            }
+            BroadcastMessage::ACSSShareMessage(msg) => {
+                handle_message_acss_share(state, swarm, peer_id, msg)
             }
         }
     }
@@ -687,6 +744,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(state.clone())
     }
 
+    fn handle_message_acss_share(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        message: ACSSShareMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let node_share_a = ACSS::share(
+            message.inputs.clone(),
+            message.dealer_share_a,
+            state.opaque_keypair.clone(),
+            message.dealer_key,
+        )?;
+        let node_share_b = ACSS::share(
+            message.inputs,
+            message.dealer_share_b,
+            state.opaque_keypair.clone(),
+            message.dealer_key,
+        )?;
+
+        let mut dkg_state = state
+            .dkg_states
+            .entry(message.wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        dkg_state.secret_share_a = Some(node_share_a);
+        dkg_state.secret_share_b = Some(node_share_b);
+
+        let topic = state
+            .broadcast_topics
+            .get(&(state.peer_id, peer_id))
+            .unwrap()
+            .clone();
+        let acss_share_message = serde_json::to_vec(&ACSSAckMessage {
+            current_index: message.current_index,
+            current_id: message.current_id,
+            wrt_index: message.wrt_index,
+            wrt_id: message.wrt_id,
+        })
+        .unwrap();
+        if let Err(e) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), acss_share_message)
+        {
+            println!("Publish error: {e:?}");
+        } else {
+            println!("[ACSS] Published acknowledgement message");
+        }
+
+        state.dkg_states.insert(message.wrt_index, dkg_state);
+
+        Ok(state.clone())
+    }
+
     fn handle_stdin(state: &mut NodeState, swarm: &mut Swarm<P2PBehaviour>, line: String) {
         let parts: Vec<&str> = line.split_whitespace().collect(); // index + proposal +
                                                                   // index_peer_id
@@ -714,6 +825,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("Proposing {proposal} (first broadcast) for node index {at_index}");
         }
+    }
+
+    fn handle_init(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        wrt_index: i32,
+        wrt_id: PeerId,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let (a_acss_dealer_share, phi_a, phi_hat_a) = ACSS::share_dealer(
+            state.acss_inputs.clone(),
+            Scalar::random(&mut OsRng),
+            state.acss_inputs.degree,
+            state.opaque_keypair.private_key,
+        )?;
+        let (b_acss_dealer_share, phi_b, phi_hat_b) = ACSS::share_dealer(
+            state.acss_inputs.clone(),
+            Scalar::random(&mut OsRng),
+            state.acss_inputs.degree,
+            state.opaque_keypair.private_key,
+        )?;
+
+        let topic = state
+            .broadcast_topics
+            .get(&(state.peer_id, wrt_id))
+            .unwrap();
+        let init_message = serde_json::to_vec(&ACSSShareMessage {
+            inputs: state.acss_inputs.clone(),
+            dealer_share_a: a_acss_dealer_share
+                .get(&wrt_id.to_string())
+                .unwrap()
+                .clone(),
+            dealer_share_b: b_acss_dealer_share
+                .get(&wrt_id.to_string())
+                .unwrap()
+                .clone(),
+            dealer_key: state.opaque_keypair.public_key,
+            current_index: state.index,
+            current_id: state.peer_id,
+            wrt_index,
+            wrt_id,
+        })
+        .unwrap();
+        let message_id = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), init_message);
+        if let Err(e) = message_id {
+            println!("Publish error: {e:?}");
+        } else {
+            println!("Sending ACSS share messages for index {wrt_index}");
+        }
+
+        Ok(state.clone())
     }
 
     fn add_peer(
@@ -761,9 +925,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Peer ID is {} + index is {}", state.peer_id, state.index);
     loop {
         select! {
-            Ok(Some(line)) = stdin.next_line() => {
+            /*Ok(Some(line)) = stdin.next_line() => {
                 handle_stdin(&mut state, &mut swarm, line);
-            }
+            }*/
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
                     add_peer(&mut state, &mut swarm, peer)?;
