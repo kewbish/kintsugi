@@ -124,6 +124,7 @@ struct DKGNodeState {
     secret_share_a: Option<ACSSNodeShare>,
     secret_share_b: Option<ACSSNodeShare>,
     s_finished: HashSet<i32>,
+    t_finished: HashSet<i32>,
     phi_a: Option<Polynomial>,
     phi_hat_a: Option<Polynomial>,
     phi_b: Option<Polynomial>,
@@ -143,6 +144,7 @@ impl DKGNodeState {
             secret_share_a: None,
             secret_share_b: None,
             s_finished: HashSet::new(),
+            t_finished: HashSet::new(),
             phi_a: None,
             phi_b: None,
             phi_hat_a: None,
@@ -234,7 +236,6 @@ struct ACSSAckMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct DKGAgreementMessage {
-    t: HashSet<i32>, // TODO - should be taking this once ABAs are completed
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -436,7 +437,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_message_acss_ack(state, swarm, max_malicious, peer_id, msg)
             }
             BroadcastMessage::DKGAgreementMessage(msg) => {
-                handle_message_dkg_agreement(state, swarm, threshold, peer_id, msg)
+                handle_message_dkg_agreement(state, swarm, max_malicious, threshold, peer_id, msg)
             }
             BroadcastMessage::DKGRandExtMessage(msg) => {
                 handle_message_dkg_rand_ext(state, swarm, threshold, peer_id, msg)
@@ -678,6 +679,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     aba_state.final_value = Some(fv.clone());
                     aba_state.est = Some(fv.clone());
                     should_continue = false;
+
+                    let topic = state
+                        .point_to_point_topics
+                        .get(&message.current_id)
+                        .unwrap()
+                        .clone();
+                    let dkg_agreement_msg = serde_json::to_vec(&DKGAgreementMessage {
+                        current_index: state.index,
+                        current_id: state.peer_id,
+                        wrt_index: message.wrt_index,
+                        wrt_id: message.wrt_id,
+                    })
+                    .unwrap();
+                    if let Err(e) = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(topic.clone(), dkg_agreement_msg)
+                    {
+                        println!("Publish error: {e:?}");
+                    } else {
+                        println!("[ACSS] Published acknowledgement message");
+                    }
                 } else {
                     aba_state.est = Some(Coin::get_value(
                         state.opaque_keypair.clone(),
@@ -831,7 +854,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         dkg_state.secret_share_a = Some(node_share_a);
         dkg_state.secret_share_b = Some(node_share_b);
 
-        let topic = state.point_to_point_topics.get(&peer_id).unwrap().clone();
+        let topic = state
+            .point_to_point_topics
+            .get(&message.current_id)
+            .unwrap()
+            .clone();
         let acss_share_message = serde_json::to_vec(&ACSSAckMessage {
             current_index: state.index,
             current_id: state.peer_id,
@@ -871,8 +898,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .dkg_states
             .insert(message.wrt_index, dkg_state.clone());
 
+        let wrt_index = state.peer_id_to_index.get(&peer_id).unwrap().clone();
         if dkg_state.s_finished.len() >= state.known_peer_ids.len() - max_malicious {
-            // TODO - initialize the n ABA instances
+            for wrt_id in state.known_peer_ids.iter() {
+                let topic = state.point_to_point_topics.get(&wrt_id).unwrap();
+                let aba_init_message = serde_json::to_vec(&ABANewRoundMessage {
+                    v: true,
+                    round_num: 0,
+                    current_index: state.index,
+                    current_id: state.peer_id,
+                    wrt_index,
+                    wrt_id: peer_id.clone(),
+                })
+                .unwrap();
+                let message_id = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic.clone(), aba_init_message);
+                if let Err(e) = message_id {
+                    println!("Publish error: {e:?}");
+                } else {
+                    println!("[DKG] Sending MVBA proposal message to index {wrt_index}");
+                }
+            }
         }
 
         Ok(state.clone())
@@ -881,6 +929,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn handle_message_dkg_agreement(
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
+        max_malicious: usize,
         threshold: usize,
         peer_id: PeerId,
         message: DKGAgreementMessage,
@@ -890,48 +939,56 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .entry(message.wrt_index)
             .or_insert(DKGNodeState::new())
             .clone();
-        let agreements = DKG::agreement_vec(
-            message
-                .t
-                .iter()
-                .map(|int| i32_to_scalar(int.clone()))
-                .collect(),
-            dkg_state.phi_a.as_ref().unwrap().clone(),
-            dkg_state.phi_hat_a.as_ref().unwrap().clone(),
-            dkg_state.phi_b.as_ref().unwrap().clone(),
-            dkg_state.phi_hat_b.as_ref().unwrap().clone(),
-            state.acss_inputs.h_point,
-            state.known_peer_ids.len(),
-        );
-
-        let (z_shares, z_hat_shares) =
-            DKG::randomness_extraction(threshold, agreements, state.known_peer_ids.len());
-        dkg_state.z_shares = Some(z_shares.clone());
-        dkg_state.z_hat_shares = Some(z_hat_shares.clone());
+        let peer_index = state.peer_id_to_index.get(&peer_id).unwrap().clone();
+        dkg_state.t_finished.insert(peer_index);
         state
             .dkg_states
             .insert(message.wrt_index, dkg_state.clone());
 
-        for wrt_id in state.known_peer_ids.iter() {
-            let topic = state.point_to_point_topics.get(&wrt_id).unwrap();
-            let wrt_index = state.peer_id_to_index.get(wrt_id).unwrap().clone();
-            let init_message = serde_json::to_vec(&DKGRandExtMessage {
-                z_share: z_shares[wrt_index as usize],
-                z_hat_share: z_hat_shares[wrt_index as usize],
-                current_index: state.index,
-                current_id: state.peer_id,
-                wrt_index,
-                wrt_id: wrt_id.clone(),
-            })
-            .unwrap();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), init_message);
-            if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
-            } else {
-                println!("[DKG] Sending RANDEX message to index {wrt_index}");
+        if dkg_state.t_finished.len() >= state.known_peer_ids.len() - max_malicious {
+            let agreements = DKG::agreement_vec(
+                dkg_state
+                    .t_finished
+                    .iter()
+                    .map(|int| i32_to_scalar(int.clone()))
+                    .collect(),
+                dkg_state.phi_a.as_ref().unwrap().clone(),
+                dkg_state.phi_hat_a.as_ref().unwrap().clone(),
+                dkg_state.phi_b.as_ref().unwrap().clone(),
+                dkg_state.phi_hat_b.as_ref().unwrap().clone(),
+                state.acss_inputs.h_point,
+                state.known_peer_ids.len(),
+            );
+
+            let (z_shares, z_hat_shares) =
+                DKG::randomness_extraction(threshold, agreements, state.known_peer_ids.len());
+            dkg_state.z_shares = Some(z_shares.clone());
+            dkg_state.z_hat_shares = Some(z_hat_shares.clone());
+            state
+                .dkg_states
+                .insert(message.wrt_index, dkg_state.clone());
+
+            for wrt_id in state.known_peer_ids.iter() {
+                let topic = state.point_to_point_topics.get(&wrt_id).unwrap();
+                let wrt_index = state.peer_id_to_index.get(wrt_id).unwrap().clone();
+                let init_message = serde_json::to_vec(&DKGRandExtMessage {
+                    z_share: z_shares[wrt_index as usize],
+                    z_hat_share: z_hat_shares[wrt_index as usize],
+                    current_index: state.index,
+                    current_id: state.peer_id,
+                    wrt_index,
+                    wrt_id: wrt_id.clone(),
+                })
+                .unwrap();
+                let message_id = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic.clone(), init_message);
+                if let Err(e) = message_id {
+                    println!("Publish error: {e:?}");
+                } else {
+                    println!("[DKG] Sending RANDEX message to index {wrt_index}");
+                }
             }
         }
 
