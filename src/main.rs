@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::ops::Index;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
@@ -123,7 +124,7 @@ impl ABANodeState {
 struct DKGNodeState {
     secret_share_a: Option<ACSSNodeShare>,
     secret_share_b: Option<ACSSNodeShare>,
-    s_finished: HashSet<i32>,
+    s_finished: HashMap<i32, Vec<RistrettoPoint>>,
     t_finished: HashSet<i32>,
     phi_a: Option<Polynomial>,
     phi_hat_a: Option<Polynomial>,
@@ -136,6 +137,7 @@ struct DKGNodeState {
     h: Option<HashMap<i32, DKGKeyDerivation>>,
     z_i: Option<Scalar>,
     evaluation_points: Option<HashMap<Scalar, RistrettoPoint>>,
+    combined_comm_vec: Option<Vec<RistrettoPoint>>,
 }
 
 impl DKGNodeState {
@@ -143,7 +145,7 @@ impl DKGNodeState {
         DKGNodeState {
             secret_share_a: None,
             secret_share_b: None,
-            s_finished: HashSet::new(),
+            s_finished: HashMap::new(),
             t_finished: HashSet::new(),
             phi_a: None,
             phi_b: None,
@@ -156,6 +158,7 @@ impl DKGNodeState {
             h: None,
             z_i: None,
             evaluation_points: None,
+            combined_comm_vec: None,
         }
     }
 }
@@ -189,6 +192,7 @@ struct SBVBroadcastMessage {
 struct ABANewRoundMessage {
     v: bool,
     round_num: i32,
+    agg_poly_comm: Option<Vec<RistrettoPoint>>,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -228,6 +232,7 @@ struct ACSSShareMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ACSSAckMessage {
+    poly_comm: Vec<RistrettoPoint>,
     current_index: i32,
     current_id: PeerId,
     wrt_index: i32,
@@ -615,6 +620,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_id: PeerId,
         message: ABANewRoundMessage,
     ) -> Result<NodeState, Box<dyn Error>> {
+        let dkg_state = state
+            .dkg_states
+            .entry(message.wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        let agg_comm_at_index: RistrettoPoint = dkg_state
+            .s_finished
+            .values()
+            .map(|v| v[state.index as usize])
+            .sum();
+
+        if message.agg_poly_comm.is_some()
+            && agg_comm_at_index == message.agg_poly_comm.unwrap()[state.index as usize]
+        {
+            println!(
+                "Could not verify aggregated commitment at index {}",
+                state.index
+            );
+            return Ok(state.clone());
+        }
+
         let mut aba_state = state
             .aba_states
             .entry(message.wrt_index)
@@ -702,10 +728,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("[ACSS] Published acknowledgement message");
                     }
                 } else {
+                    let dkg_state = state
+                        .dkg_states
+                        .entry(message.wrt_index)
+                        .or_insert(DKGNodeState::new())
+                        .clone();
                     aba_state.est = Some(Coin::get_value(
                         state.opaque_keypair.clone(),
                         message.wrt_index,
                         aba_state.round_num as usize,
+                        dkg_state.combined_comm_vec.unwrap(),
                     ));
                 }
             } else {
@@ -716,6 +748,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let new_round_message = serde_json::to_vec(&ABANewRoundMessage {
                     v: aba_state.est.unwrap(),
                     round_num: aba_state.round_num,
+                    agg_poly_comm: None,
                     current_index: state.index,
                     current_id: state.peer_id,
                     wrt_index: message.wrt_index,
@@ -859,7 +892,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .get(&message.current_id)
             .unwrap()
             .clone();
+        let mut combined_comm_vec = message
+            .dealer_shares_a
+            .get(&state.peer_id)
+            .unwrap()
+            .clone()
+            .poly_c_i
+            .clone();
+        combined_comm_vec.extend(
+            message
+                .dealer_shares_b
+                .get(&state.peer_id)
+                .unwrap()
+                .clone()
+                .poly_c_i,
+        );
+        dkg_state.combined_comm_vec = Some(combined_comm_vec.clone());
         let acss_share_message = serde_json::to_vec(&ACSSAckMessage {
+            poly_comm: combined_comm_vec,
             current_index: state.index,
             current_id: state.peer_id,
             wrt_index: message.wrt_index,
@@ -893,7 +943,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .entry(message.wrt_index)
             .or_insert(DKGNodeState::new())
             .clone();
-        dkg_state.s_finished.insert(message.current_index);
+        dkg_state
+            .s_finished
+            .insert(message.current_index, message.poly_comm);
         state
             .dkg_states
             .insert(message.wrt_index, dkg_state.clone());
@@ -901,10 +953,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let wrt_index = state.peer_id_to_index.get(&peer_id).unwrap().clone();
         if dkg_state.s_finished.len() >= state.known_peer_ids.len() - max_malicious {
             for wrt_id in state.known_peer_ids.iter() {
+                let mut agg_poly_comm = vec![
+                    RISTRETTO_BASEPOINT_POINT * Scalar::ZERO;
+                    dkg_state.phi_a.as_ref().unwrap().coeffs.len()
+                ];
+                for comm_vector in dkg_state.s_finished.values() {
+                    for (result_elem, &vec_elem) in agg_poly_comm.iter_mut().zip(comm_vector.iter())
+                    {
+                        *result_elem += vec_elem;
+                    }
+                }
                 let topic = state.point_to_point_topics.get(&wrt_id).unwrap();
                 let aba_init_message = serde_json::to_vec(&ABANewRoundMessage {
                     v: true,
                     round_num: 0,
+                    agg_poly_comm: Some(agg_poly_comm),
                     current_index: state.index,
                     current_id: state.peer_id,
                     wrt_index,
@@ -1128,6 +1191,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let init_message = serde_json::to_vec(&ABANewRoundMessage {
             v: proposal != 0,
             round_num: 0,
+            agg_poly_comm: None,
             current_index: state.index,
             current_id: state.peer_id,
             wrt_index: at_index,

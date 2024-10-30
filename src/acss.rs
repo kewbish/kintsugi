@@ -35,6 +35,7 @@ pub struct ACSSDealerShare {
     pub(crate) v_i: Vec<u8>,
     pub(crate) v_hat_i: Vec<u8>,
     pub(crate) c_i: RistrettoPoint,
+    pub(crate) poly_c_i: Vec<RistrettoPoint>,
     pub(crate) proof: ZKP,
 }
 
@@ -95,6 +96,11 @@ impl ACSS {
             let v_hat_i = v_hat_i.unwrap();
 
             let c_i = phi.at(i) * RISTRETTO_BASEPOINT_POINT + phi_hat.at(i) * inputs.h_point;
+            let poly_c_i = phi
+                .coeffs
+                .iter()
+                .map(|c| RISTRETTO_BASEPOINT_POINT * c)
+                .collect();
             let proof = ZKP::new(phi.at(i), phi_hat.at(i), inputs.h_point, c_i);
 
             shares.insert(
@@ -105,6 +111,7 @@ impl ACSS {
                     v_i,
                     v_hat_i,
                     c_i,
+                    poly_c_i,
                     proof,
                 },
             );
