@@ -51,7 +51,7 @@ impl ZKP {
 #[path = "zkp_tests.rs"]
 mod zkp_test;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DLPZKP {
     u: RistrettoPoint,
     c: Scalar,

@@ -132,7 +132,7 @@ pub struct DKGAgreements {
     pub(crate) shalf_commitments: Vec<RistrettoPoint>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DKGKeyDerivation {
     pub(crate) g_z_i: RistrettoPoint,
     pub(crate) h_z_hat_i: RistrettoPoint,

@@ -14,7 +14,7 @@ use acss::{ACSSDealerShare, ACSSInputs, ACSSNodeShare, ACSS};
 use coin::Coin;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::{RistrettoPoint, Scalar};
-use dkg::DKG;
+use dkg::{DKGKeyDerivation, DKG};
 use futures::prelude::*;
 use itertools::Itertools;
 use keypair::{Keypair, PublicKey};
@@ -129,6 +129,8 @@ struct DKGNodeState {
     phi_hat_b: Option<Polynomial>,
     z_shares: Option<Vec<Scalar>>,
     z_hat_shares: Option<Vec<Scalar>>,
+    k: Option<HashMap<i32, Scalar>>,
+    r: Option<HashMap<i32, Scalar>>,
 }
 
 impl DKGNodeState {
@@ -143,6 +145,8 @@ impl DKGNodeState {
             phi_hat_b: None,
             z_shares: None,
             z_hat_shares: None,
+            k: None,
+            r: None,
         }
     }
 }
@@ -240,6 +244,15 @@ struct DKGRandExtMessage {
     wrt_id: PeerId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct DKGDerivationMessage {
+    derivation: DKGKeyDerivation,
+    current_index: i32,
+    current_id: PeerId,
+    wrt_index: i32,
+    wrt_id: PeerId,
+}
+
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     IdIndexMessage(IdIndexMessage),
@@ -251,6 +264,7 @@ enum BroadcastMessage {
     ACSSShareMessage(ACSSShareMessage),
     ACSSAckMessage(ACSSAckMessage),
     DKGAgreementMessage(DKGAgreementMessage),
+    DKGRandExtMessage(DKGRandExtMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -412,6 +426,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::DKGAgreementMessage(msg) => {
                 handle_message_dkg_agreement(state, swarm, threshold, peer_id, msg)
+            }
+            BroadcastMessage::DKGRandExtMessage(msg) => {
+                handle_message_dkg_rand_ext(state, swarm, threshold, peer_id, msg)
             }
         }
     }
@@ -938,6 +955,83 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("[DKG] Sending RANDEX message to index {wrt_index}");
             }
         }
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_dkg_rand_ext(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        threshold: usize,
+        peer_id: PeerId,
+        message: DKGRandExtMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        let mut dkg_state = state
+            .dkg_states
+            .entry(message.wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        dkg_state
+            .k
+            .as_mut()
+            .or(Some(&mut HashMap::<i32, Scalar>::new()))
+            .unwrap()
+            .insert(message.wrt_index, message.z_share);
+        dkg_state
+            .r
+            .as_mut()
+            .or(Some(&mut HashMap::<i32, Scalar>::new()))
+            .unwrap()
+            .insert(message.wrt_index, message.z_hat_share);
+
+        if dkg_state.k.as_ref().unwrap().len() > threshold {
+            let execution_result = dkg_state
+                .k
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (i32_to_scalar(k.clone()), v.clone()))
+                .collect();
+            let execution_hat_result = dkg_state
+                .r
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (i32_to_scalar(k.clone()), v.clone()))
+                .collect();
+            let (z_i, z_hat_i) = DKG::pre_key_derivation(
+                state.index as usize,
+                execution_result,
+                execution_hat_result,
+            );
+            let derivation =
+                DKG::pre_key_derivation_public(z_i, z_hat_i, state.acss_inputs.h_point);
+
+            let topic = state
+                .broadcast_topics
+                .get(&(state.peer_id, peer_id))
+                .unwrap()
+                .clone();
+            let dkg_derivation_msg = serde_json::to_vec(&DKGDerivationMessage {
+                derivation,
+                current_index: state.index,
+                current_id: state.peer_id,
+                wrt_index: message.wrt_index,
+                wrt_id: message.wrt_id,
+            })
+            .unwrap();
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), dkg_derivation_msg)
+            {
+                println!("Publish error: {e:?}");
+            } else {
+                println!("[DKG] Published key derivation message");
+            }
+        }
+
+        state.dkg_states.insert(message.wrt_index, dkg_state);
 
         Ok(state.clone())
     }
