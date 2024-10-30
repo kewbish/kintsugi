@@ -131,6 +131,9 @@ struct DKGNodeState {
     z_hat_shares: Option<Vec<Scalar>>,
     k: Option<HashMap<i32, Scalar>>,
     r: Option<HashMap<i32, Scalar>>,
+    h: Option<HashMap<i32, DKGKeyDerivation>>,
+    z_i: Option<Scalar>,
+    evaluation_points: Option<HashMap<Scalar, RistrettoPoint>>,
 }
 
 impl DKGNodeState {
@@ -147,6 +150,9 @@ impl DKGNodeState {
             z_hat_shares: None,
             k: None,
             r: None,
+            h: None,
+            z_i: None,
+            evaluation_points: None,
         }
     }
 }
@@ -265,6 +271,7 @@ enum BroadcastMessage {
     ACSSAckMessage(ACSSAckMessage),
     DKGAgreementMessage(DKGAgreementMessage),
     DKGRandExtMessage(DKGRandExtMessage),
+    DKGDerivationMessage(DKGDerivationMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -429,6 +436,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::DKGRandExtMessage(msg) => {
                 handle_message_dkg_rand_ext(state, swarm, threshold, peer_id, msg)
+            }
+            BroadcastMessage::DKGDerivationMessage(msg) => {
+                handle_message_dkg_derivation(state, swarm, threshold, peer_id, msg)
             }
         }
     }
@@ -1004,6 +1014,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 execution_result,
                 execution_hat_result,
             );
+            dkg_state.z_i = Some(z_i);
             let derivation =
                 DKG::pre_key_derivation_public(z_i, z_hat_i, state.acss_inputs.h_point);
 
@@ -1029,6 +1040,56 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 println!("[DKG] Published key derivation message");
             }
+        }
+
+        state.dkg_states.insert(message.wrt_index, dkg_state);
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_dkg_derivation(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        threshold: usize,
+        peer_id: PeerId,
+        message: DKGDerivationMessage,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        if !message
+            .derivation
+            .zkp
+            .verify(RISTRETTO_BASEPOINT_POINT, message.derivation.g_z_i)
+            || !message
+                .derivation
+                .zkp_hat
+                .verify(state.acss_inputs.h_point, message.derivation.h_z_hat_i)
+        {
+            return Ok(state.clone()); // break early
+        }
+        let mut dkg_state = state
+            .dkg_states
+            .entry(message.wrt_index)
+            .or_insert(DKGNodeState::new())
+            .clone();
+        dkg_state
+            .h
+            .as_mut()
+            .or(Some(&mut HashMap::<i32, DKGKeyDerivation>::new()))
+            .unwrap()
+            .insert(message.wrt_index, message.derivation);
+
+        let h_scalar_to_scalar_map = dkg_state
+            .h
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (i32_to_scalar(k.clone()), v.clone()))
+            .collect();
+        if dkg_state.h.as_ref().unwrap().len() > threshold {
+            let evaluation_points =
+                DKG::key_derivation(state.known_peer_ids.len(), h_scalar_to_scalar_map).unwrap();
+            dkg_state.evaluation_points = Some(evaluation_points);
+
+            println!("[DKG] Derived key share");
         }
 
         state.dkg_states.insert(message.wrt_index, dkg_state);
