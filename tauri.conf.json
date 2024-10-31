@@ -1,0 +1,29 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "OP2Paque",
+  "version": "0.1.0",
+  "identifier": "com.tauri.dev",
+  "build": {
+    "frontendDist": "./web",
+    "devUrl": "http://0.0.0.0:3000"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "OP2Paque",
+        "width": 800,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": null
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

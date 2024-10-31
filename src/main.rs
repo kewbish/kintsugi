@@ -1333,6 +1333,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("Peer ID is {} + index is {}", state.peer_id, state.index);
+
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("Error while running Tauri application");
+
     loop {
         select! {
             /*Ok(Some(line)) = stdin.next_line() => {
