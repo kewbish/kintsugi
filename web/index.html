@@ -2,9 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title></title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OP2Paque</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css"
+    />
   </head>
+  <style>
+    :root {
+      --main: #f6b83c;
+      --main-dark: #f5a300;
+      --main-light: #f9cd7b;
+      --grey: #495d68;
+      --dark-grey: #1e1e1e;
+      --text-bright: var(--dark-grey);
+      --text-main: var(--grey);
+      --links: var(--main);
+      --focus: rgba(var(--main-light), 0.6);
+      --button-base: var(--main-light);
+      --button-hover: var(--main);
+      --variable: var(--main-dark);
+      --highlight: var(--main-light);
+      --scrollbar-thumb: var(--main-light);
+      --selection: var(--main-light);
+    }
+    body,
+    html,
+    #root {
+      height: 100%;
+    }
+  </style>
   <body>
-    hi!
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

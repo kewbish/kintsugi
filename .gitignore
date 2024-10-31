@@ -26,3 +26,5 @@ Cargo.lock
 
 node_modules/
 gen/
+
+package-lock.json

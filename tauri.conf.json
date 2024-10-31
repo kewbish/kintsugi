@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.tauri.dev",
   "build": {
-    "frontendDist": "./web",
-    "devUrl": "http://0.0.0.0:3000"
+    "frontendDist": "./web/dist",
+    "devUrl": "http://localhost:5173"
   },
   "app": {
     "windows": [
