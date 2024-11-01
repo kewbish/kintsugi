@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ops::Index;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::State;
 use tokio::{io, io::AsyncBufReadExt, select};
@@ -305,7 +305,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let mut state = NodeState {
+    let state = NodeState {
         peer_id: PeerId::random(),        // temp
         known_peer_ids: HashSet::new(),   // temp
         peer_id_to_index: HashMap::new(), // temp
@@ -324,6 +324,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer_public_keys: HashMap::new(),
         },
     };
+    let state_arc = Arc::new(Mutex::new(state));
 
     let max_malicious = 1;
     let threshold = 3;
@@ -369,10 +370,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mdns =
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
 
+            let mut state = state_arc.lock().unwrap();
+            if let Some(index_val) = std::env::args().nth(1) {
+                let int = index_val.to_string().parse::<i32>().unwrap();
+                state.index = int;
+            }
             state.peer_id = key.public().to_peer_id();
             state.known_peer_ids = HashSet::from([state.peer_id]);
             state.peer_id_to_index = HashMap::from([(state.peer_id, state.index)]);
             state.broadcast_topic = IdentTopic::new(format!("{}", state.peer_id));
+            println!("Peer ID is {} + index is {}", state.peer_id, state.index);
 
             Ok(P2PBehaviour {
                 gossipsub,
@@ -400,57 +407,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     swarm.behaviour_mut().kad.bootstrap()?;*/
 
-    if let Some(index_val) = std::env::args().nth(1) {
-        let int = index_val.to_string().parse::<i32>().unwrap();
-        state.index = int;
-    }
-
     fn handle_message(
-        state: &mut NodeState,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         max_malicious: usize,
         threshold: usize,
         peer_id: PeerId,
         id: MessageId,
         message: Message,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
         let message_data: BroadcastMessage =
             serde_json::from_slice(message.data.as_slice()).unwrap();
 
         match message_data {
             BroadcastMessage::IdIndexMessage(msg) => {
                 state.peer_id_to_index.insert(peer_id, msg.index);
-                Ok(state.clone())
+                Ok(())
             }
             BroadcastMessage::BVBroadcastMessage(msg) => {
-                handle_message_bv(state, swarm, max_malicious, peer_id, msg)
+                handle_message_bv(&mut state, swarm, max_malicious, peer_id, msg)
             }
             BroadcastMessage::SBVBroadcastMessage(msg) => {
-                handle_message_sbv(state, swarm, max_malicious, peer_id, msg)
+                handle_message_sbv(&mut state, swarm, max_malicious, peer_id, msg)
             }
             BroadcastMessage::ABANewRoundMessage(msg) => {
-                handle_message_aba_new_round(state, swarm, peer_id, msg)
+                handle_message_aba_new_round(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::ABASBVReturnMessage(msg) => {
-                handle_message_aba_sbv_return(state, swarm, peer_id, msg)
+                handle_message_aba_sbv_return(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::ABAAuxsetMessage(msg) => {
-                handle_message_aba_auxset(state, swarm, max_malicious, peer_id, msg)
+                handle_message_aba_auxset(&mut state, swarm, max_malicious, peer_id, msg)
             }
             BroadcastMessage::ACSSShareMessage(msg) => {
-                handle_message_acss_share(state, swarm, peer_id, msg)
+                handle_message_acss_share(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::ACSSAckMessage(msg) => {
-                handle_message_acss_ack(state, swarm, max_malicious, peer_id, msg)
+                handle_message_acss_ack(&mut state, swarm, max_malicious, peer_id, msg)
             }
-            BroadcastMessage::DKGAgreementMessage(msg) => {
-                handle_message_dkg_agreement(state, swarm, max_malicious, threshold, peer_id, msg)
-            }
+            BroadcastMessage::DKGAgreementMessage(msg) => handle_message_dkg_agreement(
+                &mut state,
+                swarm,
+                max_malicious,
+                threshold,
+                peer_id,
+                msg,
+            ),
             BroadcastMessage::DKGRandExtMessage(msg) => {
-                handle_message_dkg_rand_ext(state, swarm, threshold, peer_id, msg)
+                handle_message_dkg_rand_ext(&mut state, swarm, threshold, peer_id, msg)
             }
             BroadcastMessage::DKGDerivationMessage(msg) => {
-                handle_message_dkg_derivation(state, swarm, threshold, peer_id, msg)
+                handle_message_dkg_derivation(&mut state, swarm, threshold, peer_id, msg)
             }
         }
     }
@@ -461,7 +469,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         max_malicious: usize,
         peer_id: PeerId,
         message: BVBroadcastMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut bv_state = state
             .bv_broadcast_states
             .entry(message.wrt_index)
@@ -539,7 +547,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .bv_broadcast_states
             .insert(message.wrt_index, bv_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_sbv(
@@ -548,7 +556,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         max_malicious: usize,
         peer_id: PeerId,
         message: SBVBroadcastMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut sbv_state = state
             .sbv_broadcast_states
             .entry(message.wrt_index)
@@ -613,7 +621,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .sbv_broadcast_states
             .insert(message.wrt_index, sbv_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_aba_new_round(
@@ -621,7 +629,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
         message: ABANewRoundMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let dkg_state = state
             .dkg_states
             .entry(message.wrt_index)
@@ -640,7 +648,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 "Could not verify aggregated commitment at index {}",
                 state.index
             );
-            return Ok(state.clone());
+            return Ok(());
         }
 
         let mut aba_state = state
@@ -678,7 +686,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.aba_states.insert(message.wrt_index, aba_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_aba_sbv_return(
@@ -686,7 +694,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
         message: ABASBVReturnMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut aba_state = state
             .aba_states
             .entry(message.wrt_index)
@@ -796,7 +804,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.aba_states.insert(message.wrt_index, aba_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_aba_auxset(
@@ -805,7 +813,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         max_malicious: usize,
         peer_id: PeerId,
         message: ABAAuxsetMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut aba_state = state
             .aba_states
             .entry(message.wrt_index)
@@ -859,7 +867,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.aba_states.insert(message.wrt_index, aba_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_acss_share(
@@ -867,7 +875,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
         message: ACSSShareMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let node_share_a = ACSS::share(
             message.inputs.clone(),
             message.dealer_shares_a.get(&state.peer_id).unwrap().clone(),
@@ -930,7 +938,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.dkg_states.insert(message.wrt_index, dkg_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_acss_ack(
@@ -939,7 +947,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         max_malicious: usize,
         peer_id: PeerId,
         message: ACSSAckMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut dkg_state = state
             .dkg_states
             .entry(message.wrt_index)
@@ -988,7 +996,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_dkg_agreement(
@@ -998,7 +1006,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         threshold: usize,
         peer_id: PeerId,
         message: DKGAgreementMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut dkg_state = state
             .dkg_states
             .entry(message.wrt_index)
@@ -1057,7 +1065,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_dkg_rand_ext(
@@ -1066,7 +1074,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         threshold: usize,
         peer_id: PeerId,
         message: DKGRandExtMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let mut dkg_state = state
             .dkg_states
             .entry(message.wrt_index)
@@ -1130,7 +1138,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.dkg_states.insert(message.wrt_index, dkg_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_message_dkg_derivation(
@@ -1139,7 +1147,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         threshold: usize,
         peer_id: PeerId,
         message: DKGDerivationMessage,
-    ) -> Result<NodeState, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         if !message
             .derivation
             .zkp
@@ -1149,7 +1157,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .zkp_hat
                 .verify(state.acss_inputs.h_point, message.derivation.h_z_hat_i)
         {
-            return Ok(state.clone()); // break early
+            return Ok(()); // break early
         }
         let mut dkg_state = state
             .dkg_states
@@ -1180,7 +1188,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.dkg_states.insert(message.wrt_index, dkg_state);
 
-        Ok(state.clone())
+        Ok(())
     }
 
     fn handle_stdin(state: &mut NodeState, swarm: &mut Swarm<P2PBehaviour>, line: String) {
@@ -1288,10 +1296,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     fn add_peer(
-        state: &mut NodeState,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         peer: PeerId,
     ) -> Result<(), Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
         println!("Routing updated with peer: {:?}", peer);
         state.known_peer_ids.insert(peer);
         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
@@ -1318,10 +1327,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     fn remove_peer(
-        state: &mut NodeState,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         peer: PeerId,
     ) -> Result<(), Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
         if let Some(topic) = state.point_to_point_topics.get(&peer) {
             swarm.behaviour_mut().gossipsub.unsubscribe(&topic)?;
@@ -1334,18 +1344,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    println!("Peer ID is {} + index is {}", state.peer_id, state.index);
-
-    struct TauriState(String);
+    struct TauriState(Arc<Mutex<NodeState>>);
 
     #[tauri::command]
     fn get_peer_id(state: State<TauriState>) -> String {
-        state.0.clone()
+        let node_state = state.0.lock().unwrap();
+        node_state.peer_id.to_string()
     }
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![get_peer_id])
-        .manage(TauriState(state.peer_id.to_string()))
+        .manage(TauriState(Arc::clone(&state_arc)))
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");
 
@@ -1356,19 +1365,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }*/
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
-                    add_peer(&mut state, &mut swarm, peer)?;
+                    add_peer(state_arc.clone(), &mut swarm, peer)?;
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::UnroutablePeer { peer })) => {
-                    remove_peer(&mut state, &mut swarm, peer)?;
+                    remove_peer(state_arc.clone(), &mut swarm, peer)?;
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer, _multiaddr) in list {
-                        add_peer(&mut state, &mut swarm, peer)?;
+                        add_peer(state_arc.clone(), &mut swarm, peer)?;
                     }
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer, _multiaddr) in list {
-                        remove_peer(&mut state, &mut swarm, peer)?;
+                        remove_peer(state_arc.clone(), &mut swarm, peer)?;
                     }
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -1376,7 +1385,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     message_id: id,
                     message,
                 })) => {
-                    state = handle_message(&mut state, &mut swarm, max_malicious, threshold, peer_id, id, message)?;
+                    handle_message(state_arc.clone(), &mut swarm, max_malicious, threshold, peer_id, id, message)?;
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
