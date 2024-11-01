@@ -1,4 +1,5 @@
-import JazziconComponent from "./JazziconComponent";
+import { Link } from "react-router-dom";
+import User from "./components/User";
 
 const ContactSelection = () => {
   const USERS = [
@@ -15,30 +16,22 @@ const ContactSelection = () => {
         flexDirection: "column",
         justifyContent: "center",
         height: "100%",
-        marginTop: "-10em",
+        marginTop: "-5em",
       }}
     >
+      <Link to="/">&lt; back</Link>
       <h1>Recovery contacts</h1>
       {USERS.map((user, i) => (
         <div>
-          <div
-            style={{
-              display: "flex",
-              gap: "1em",
-              alignItems: "center",
-            }}
-          >
-            <div style={{ flexBasis: "20%" }}>
-              <JazziconComponent user={user} />
-            </div>
-            <div>
-              <p style={{ marginBottom: "0.5em" }}>
-                <b>{user}</b>
-              </p>
-              <button>Remove contact</button>
-              <button>Send password check reminder</button>
-            </div>
-          </div>
+          <User
+            user={user}
+            actions={
+              <>
+                <button>Remove contact</button>
+                <button>Send password check reminder</button>
+              </>
+            }
+          />
           {i != USERS.length - 1 ? <hr style={{ marginTop: "1em" }} /> : null}
         </div>
       ))}
