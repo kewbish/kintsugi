@@ -30,7 +30,9 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ops::Index;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
+use tauri::State;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
 use util::i32_to_scalar;
@@ -1334,7 +1336,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Peer ID is {} + index is {}", state.peer_id, state.index);
 
+    struct TauriState(String);
+
+    #[tauri::command]
+    fn get_peer_id(state: State<TauriState>) -> String {
+        state.0.clone()
+    }
+
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![get_peer_id])
+        .manage(TauriState(state.peer_id.to_string()))
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");
 

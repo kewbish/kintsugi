@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Link } from "react-router-dom";
 
 function Home() {
   return (
@@ -12,7 +12,11 @@ function Home() {
       }}
     >
       <h1 style={{ textAlign: "center" }}>Welcome to OP2Paque!</h1>
-      <p>You are logged in.</p>
+      <p>
+        You are logged in. See your{" "}
+        <Link to={"/contacts"}> recovery contacts</Link> or{" "}
+        <Link to="/login">log out</Link>.
+      </p>
     </div>
   );
 }
