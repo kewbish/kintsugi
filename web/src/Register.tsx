@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import { Link, useNavigate } from "react-router-dom";
+import { AuthContext } from "./components/AuthContext";
 
 function Register() {
   const [password, setPassword] = useState<string>("");
@@ -17,6 +18,13 @@ function Register() {
         toast.error(err);
       });
   };
+
+  const { isLoggedIn, setIsLoggedIn } = useContext(AuthContext);
+
+  if (isLoggedIn) {
+    toast("User is already authenticated!");
+    navigate("/");
+  }
 
   return (
     <div

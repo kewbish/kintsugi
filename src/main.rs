@@ -43,7 +43,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::{io, io::AsyncBufReadExt, io::AsyncReadExt, select, sync::mpsc};
 use tracing_subscriber::EnvFilter;
 use util::i32_to_scalar;

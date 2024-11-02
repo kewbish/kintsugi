@@ -1,17 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useContext } from "react";
 import toast from "react-hot-toast";
 import { Link } from "react-router-dom";
+import { AuthContext } from "./components/AuthContext";
 
 function Home() {
   const [notepad, setNotepad] = useState("");
+  const { isLoggedIn, setIsLoggedIn } = useContext(AuthContext);
 
   useEffect(() => {
-    invoke("read_notepad")
-      .then((resp) => {
-        setNotepad(resp as string);
-      })
-      .catch((err) => toast.error(err));
+    if (isLoggedIn) {
+      invoke("read_notepad")
+        .then((resp) => {
+          setNotepad(resp as string);
+        })
+        .catch((err) => toast.error(err));
+    }
   }, []);
 
   const saveNotepad = async () => {
@@ -34,7 +38,15 @@ function Home() {
       <p>
         You are logged in. See your{" "}
         <Link to={"/contacts"}> recovery contacts</Link> or{" "}
-        <Link to="/login">log out</Link>.
+        <Link
+          to="/login"
+          onClick={() => {
+            setIsLoggedIn(false);
+          }}
+        >
+          log out
+        </Link>
+        .
       </p>
       <h2>Encrypted Notepad</h2>
       <textarea

@@ -8,11 +8,17 @@ import Recovery from "./Recovery";
 import { Toaster } from "react-hot-toast";
 import "react-loading-skeleton/dist/skeleton.css";
 import Register from "./Register";
+import { AuthProvider } from "./components/AuthContext";
+import RequiresAuth from "./components/RequiresAuth";
 
 const router = createBrowserRouter([
   {
     path: "/",
-    element: <Home />,
+    element: (
+      <RequiresAuth>
+        <Home />
+      </RequiresAuth>
+    ),
   },
   {
     path: "/login",
@@ -24,17 +30,27 @@ const router = createBrowserRouter([
   },
   {
     path: "/contacts",
-    element: <ContactSelection />,
+    element: (
+      <RequiresAuth>
+        <ContactSelection />
+      </RequiresAuth>
+    ),
   },
   {
     path: "/recovery/contacts/:peer",
-    element: <Recovery />,
+    element: (
+      <RequiresAuth>
+        <Recovery />
+      </RequiresAuth>
+    ),
   },
 ]);
 
 createRoot(document.getElementById("root")!).render(
-  <StrictMode>
+  <>
     <Toaster />
-    <RouterProvider router={router} />
-  </StrictMode>
+    <AuthProvider>
+      <RouterProvider router={router} />
+    </AuthProvider>
+  </>
 );
