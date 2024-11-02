@@ -3,9 +3,10 @@ import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import { Link, useNavigate } from "react-router-dom";
 
-function Login() {
+function Register() {
   const [peerId, setPeerId] = useState<string>("");
   const [password, setPassword] = useState<string>("");
+  const navigate = useNavigate();
 
   useEffect(() => {
     const fetchPeerId = async () => {
@@ -15,15 +16,15 @@ function Login() {
     fetchPeerId();
   }, []);
 
-  const navigate = useNavigate();
-
-  const login = () => {
-    invoke("check_envelope", { password })
-      .then((resp) => {
-        toast.success("Successfully logged in!");
+  const register = () => {
+    invoke("save_envelope", { password })
+      .then((_) => {
+        toast.success("Successfully registered!");
         navigate("/");
       })
-      .catch((err) => toast.error(err));
+      .catch((err) => {
+        toast.error(err);
+      });
   };
 
   return (
@@ -48,15 +49,15 @@ function Login() {
       />
       <input
         type="submit"
-        value="Log in"
+        value="Register"
         style={{ margin: "1em auto 0" }}
-        onClick={() => login()}
+        onClick={() => register()}
       />
       <p style={{ textAlign: "center" }}>
-        <Link to="/register">Register</Link>
+        <Link to="/login">Login</Link>
       </p>
     </div>
   );
 }
 
-export default Login;
+export default Register;

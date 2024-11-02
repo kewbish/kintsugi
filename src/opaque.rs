@@ -18,6 +18,7 @@ pub enum P2POpaqueError {
     RegistrationError,
     CryptoError(String),
     SerializationError(String),
+    FileError(String),
 }
 
 impl std::error::Error for P2POpaqueError {
@@ -132,67 +133,11 @@ pub struct Envelope {
     pub(crate) peer_id: String,
 }
 
-impl Envelope {
-    pub fn encrypt_w_password(self, password: String) -> Result<EncryptedEnvelope, P2POpaqueError> {
-        let mut hasher = Sha3_256::new();
-        hasher.update(password.as_bytes());
-        let key = hasher.finalize();
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let plaintext = serde_json::to_string(&self);
-        if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
-                "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
-        if let Err(e) = ciphertext {
-            return Err(P2POpaqueError::CryptoError(
-                "Encryption of envelope failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let ciphertext = ciphertext.unwrap();
-
-        Ok(EncryptedEnvelope {
-            public_key: None,
-            encrypted_envelope: ciphertext,
-            nonce: nonce_bytes,
-        })
-    }
-}
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct EncryptedEnvelope {
     pub(crate) public_key: Option<PublicKey>,
     pub(crate) encrypted_envelope: Vec<u8>,
     pub(crate) nonce: [u8; 12],
-}
-
-impl EncryptedEnvelope {
-    pub fn decrypt_w_password(self, password: String) -> Result<Envelope, P2POpaqueError> {
-        let mut hasher = Sha3_256::new();
-        hasher.update(password.as_bytes());
-        let key = hasher.finalize();
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let nonce = Nonce::from_slice(&self.nonce);
-        let plaintext_bytes = cipher.decrypt(nonce, self.encrypted_envelope.as_ref());
-        if let Err(e) = plaintext_bytes {
-            return Err(P2POpaqueError::CryptoError(
-                "Decryption failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let plaintext_bytes = plaintext_bytes.unwrap();
-        let plaintext: Result<Envelope, _> = serde_json::from_slice(&plaintext_bytes);
-        if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
-                "Deserialization failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        Ok(plaintext.unwrap())
-    }
 }
 
 impl P2POpaqueNode {
@@ -387,10 +332,6 @@ impl P2POpaqueNode {
         Ok(plaintext.keypair)
     }
 }
-
-#[cfg(test)]
-#[path = "opaque_tests.rs"]
-mod local_encdec_test;
 
 #[cfg(test)]
 #[path = "opaque_tests.rs"]
