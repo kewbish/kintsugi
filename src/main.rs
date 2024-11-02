@@ -1397,9 +1397,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(e.to_string());
         }
         node_state.opaque_keypair = Keypair::new();
+        let libp2p_keypair = libp2p::identity::ed25519::Keypair::generate();
         let envelope = LocalEnvelope {
             keypair: node_state.opaque_keypair.clone(),
-            libp2p_keypair: libp2p::identity::ed25519::Keypair::generate(),
+            libp2p_keypair_bytes: libp2p_keypair.to_bytes(),
             peer_public_key: (Scalar::ZERO * RISTRETTO_BASEPOINT_POINT)
                 .compress()
                 .to_bytes(),
@@ -1420,7 +1421,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(e.to_string());
         }
         let tx_clone = state.1.clone();
-        let keypair = envelope.clone().libp2p_keypair;
+        let keypair = libp2p_keypair.clone();
         tokio::spawn(async move {
             tx_clone
                 .send(TauriToRustCommand::NewSwarm(keypair))
@@ -1464,10 +1465,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 node_state.peer_id, node_state.index
             );
             let tx_clone = state.1.clone();
-            let keypair = envelope.clone().libp2p_keypair;
+            let keypair = libp2p::identity::ed25519::Keypair::try_from_bytes(
+                &mut envelope.libp2p_keypair_bytes.clone(),
+            );
+            if let Err(e) = keypair {
+                return Err(e.to_string());
+            }
+            node_state.opaque_keypair = envelope.keypair;
             tokio::spawn(async move {
                 tx_clone
-                    .send(TauriToRustCommand::NewSwarm(keypair))
+                    .send(TauriToRustCommand::NewSwarm(keypair.unwrap()))
                     .await
                     .unwrap();
             });

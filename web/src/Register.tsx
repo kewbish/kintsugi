@@ -4,17 +4,8 @@ import toast from "react-hot-toast";
 import { Link, useNavigate } from "react-router-dom";
 
 function Register() {
-  const [peerId, setPeerId] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const navigate = useNavigate();
-
-  useEffect(() => {
-    const fetchPeerId = async () => {
-      invoke("get_peer_id").then((resp) => setPeerId(resp as string));
-    };
-
-    fetchPeerId();
-  }, []);
 
   const register = () => {
     invoke("save_envelope", { password })
@@ -38,8 +29,6 @@ function Register() {
       }}
     >
       <h1 style={{ textAlign: "center" }}>Welcome to OP2Paque!</h1>
-      <label htmlFor="connection_identifier">Identifier</label>
-      <input type="text" id="connection_identifier" value={peerId} disabled />
       <label htmlFor="password">Password</label>
       <input
         type="password"

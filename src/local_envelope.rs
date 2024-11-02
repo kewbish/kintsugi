@@ -6,75 +6,20 @@ use chacha20poly1305::{
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
-use serde::Deserializer;
 use serde::{ser::SerializeStruct, Serialize, Serializer};
+use serde::{Deserialize, Deserializer};
+use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256};
 
-#[derive(Debug, Clone)]
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct LocalEnvelope {
     pub(crate) keypair: Keypair,
-    pub(crate) libp2p_keypair: libp2p::identity::ed25519::Keypair,
+    #[serde_as(as = "Bytes")]
+    pub(crate) libp2p_keypair_bytes: [u8; 64],
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
 }
-
-impl serde::Serialize for LocalEnvelope {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("LocalEnvelope", 4)?;
-        state.serialize_field("keypair", &self.keypair)?;
-        state.serialize_field("libp2p_keypair", &self.libp2p_keypair.to_bytes().to_vec())?;
-        state.serialize_field("peer_public_key", &self.peer_public_key)?;
-        state.serialize_field("peer_id", &self.peer_id)?;
-        state.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for LocalEnvelope {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct LocalEnvelopeRaw {
-            keypair: Keypair,
-            libp2p_keypair: Vec<u8>,
-            peer_public_key: PublicKey,
-            peer_id: String,
-        }
-
-        let raw = LocalEnvelopeRaw::deserialize(deserializer)?;
-
-        let mut libp2p_keypair_bytes: [u8; 32] = raw
-            .libp2p_keypair
-            .as_slice()
-            .try_into()
-            .map_err(serde::de::Error::custom)?;
-
-        let libp2p_keypair =
-            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut libp2p_keypair_bytes)
-                .map_err(serde::de::Error::custom)?;
-
-        Ok(LocalEnvelope {
-            keypair: raw.keypair,
-            libp2p_keypair,
-            peer_public_key: raw.peer_public_key,
-            peer_id: raw.peer_id,
-        })
-    }
-}
-
-impl PartialEq for LocalEnvelope {
-    fn eq(&self, other: &Self) -> bool {
-        self.keypair == other.keypair
-            && self.libp2p_keypair.to_bytes() == other.libp2p_keypair.to_bytes()
-            && self.peer_public_key == other.peer_public_key
-            && self.peer_id == other.peer_id
-    }
-}
-impl Eq for LocalEnvelope {}
 
 impl LocalEnvelope {
     pub fn encrypt_w_password(
