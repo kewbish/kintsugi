@@ -12,6 +12,10 @@ mod util;
 mod zkp;
 
 use acss::{ACSSDealerShare, ACSSInputs, ACSSNodeShare, ACSS};
+use chacha20poly1305::{
+    aead::{Aead, AeadCore, KeyInit},
+    ChaCha20Poly1305, Key, Nonce,
+};
 use coin::Coin;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::{RistrettoPoint, Scalar};
@@ -27,6 +31,7 @@ use local_envelope::{LocalEncryptedEnvelope, LocalEnvelope};
 use opaque::{EncryptedEnvelope, Envelope, P2POpaqueError};
 use polynomial::Polynomial;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
@@ -301,6 +306,12 @@ enum TauriToRustCommand {
     NewSwarm(libp2p::identity::ed25519::Keypair),
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EncryptedTauriNotepad {
+    encrypted_contents: Vec<u8>,
+    nonce: [u8; 12],
+}
+
 /* // from IPFS network
 const BOOTNODES: [&str; 4] = [
     "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -415,10 +426,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     swarm.behaviour_mut().kad.bootstrap()?;*/
 
-    let mut state = state_arc.lock().unwrap();
-    if let Some(index_val) = std::env::args().nth(1) {
-        let int = index_val.to_string().parse::<i32>().unwrap();
-        state.index = int;
+    {
+        let mut state = state_arc.lock().unwrap();
+        if let Some(index_val) = std::env::args().nth(1) {
+            let int = index_val.to_string().parse::<i32>().unwrap();
+            state.index = int;
+        }
     }
 
     fn handle_message(
@@ -1462,11 +1475,88 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(true)
     }
 
+    #[tauri::command]
+    fn save_notepad(state: State<TauriState>, notepad: String) -> Result<(), String> {
+        let node_state = state.0.lock().unwrap();
+        let mut hasher = Sha3_256::new();
+        hasher.update(node_state.opaque_keypair.private_key);
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, notepad.as_bytes());
+        if let Err(e) = ciphertext {
+            return Err("Encryption of notepad failed: ".to_string() + &e.to_string());
+        }
+        let ciphertext = ciphertext.unwrap();
+        let encrypted_notepad = EncryptedTauriNotepad {
+            encrypted_contents: ciphertext,
+            nonce: nonce_bytes,
+        };
+        let serialized_ciphertext = serde_json::to_string(&encrypted_notepad);
+        if let Err(e) = serialized_ciphertext {
+            return Err(e.to_string());
+        }
+        let file_path = "tmp/notepad.txt".to_string();
+        if let Err(e) = fs::create_dir_all("tmp") {
+            return Err(e.to_string());
+        }
+        let file = fs::File::create(file_path);
+        if let Err(e) = file {
+            return Err(e.to_string());
+        }
+        let result = file
+            .unwrap()
+            .write_all(serialized_ciphertext.unwrap().as_bytes());
+        if let Err(e) = result {
+            return Err(e.to_string());
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn read_notepad(state: State<TauriState>) -> Result<String, String> {
+        let file_path = "tmp/notepad.txt".to_string();
+        if !Path::new(&file_path).exists() {
+            return Ok("".to_string());
+        }
+        let contents = std::fs::read_to_string(file_path);
+        if let Err(e) = contents {
+            return Err(e.to_string());
+        }
+        let encrypted_notepad: Result<EncryptedTauriNotepad, _> =
+            serde_json::from_str(&contents.unwrap());
+        if let Err(e) = encrypted_notepad {
+            return Err(e.to_string());
+        }
+        let encrypted_notepad = encrypted_notepad.unwrap();
+        let node_state = state.0.lock().unwrap();
+        let mut hasher = Sha3_256::new();
+        hasher.update(node_state.opaque_keypair.private_key);
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let nonce = Nonce::from_slice(&encrypted_notepad.nonce);
+
+        let plaintext_bytes = cipher.decrypt(nonce, encrypted_notepad.encrypted_contents.as_ref());
+        if let Err(e) = plaintext_bytes {
+            return Err("Decryption failed: ".to_string() + &e.to_string());
+        }
+        let plaintext_bytes = plaintext_bytes.unwrap();
+        let notepad = std::str::from_utf8(&plaintext_bytes);
+        if let Err(e) = notepad {
+            return Err(e.to_string());
+        }
+        Ok(notepad.unwrap().to_string())
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_peer_id,
             save_envelope,
-            check_envelope
+            check_envelope,
+            read_notepad,
+            save_notepad
         ])
         .manage(TauriState(Arc::clone(&state_arc), tx))
         .run(tauri::generate_context!())
