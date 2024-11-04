@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import User from "./components/User";
 
 const ContactSelection = () => {
@@ -8,6 +8,7 @@ const ContactSelection = () => {
     "/dnsaddr/bootstrap.libp2p.io/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
     "/dnsaddr/bootstrap.libp2p.io/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
   ];
+  const navigate = useNavigate();
 
   return (
     <div
@@ -22,14 +23,21 @@ const ContactSelection = () => {
       <Link to="/">&lt; back</Link>
       <h1>Recovery contacts</h1>
       {USERS.map((user, i) => (
-        <div>
+        <div key={user}>
           <User
             user={user}
             actions={
-              <>
+              <div style={{ paddingTop: ".5em" }}>
+                <button
+                  onClick={() =>
+                    navigate(`/recovery/contacts/${encodeURIComponent(user)}`)
+                  }
+                >
+                  Request recovery
+                </button>
                 <button>Remove contact</button>
-                <button>Send password check reminder</button>
-              </>
+                <button>Remind to password check</button>
+              </div>
             }
           />
           {i != USERS.length - 1 ? <hr style={{ marginTop: "1em" }} /> : null}

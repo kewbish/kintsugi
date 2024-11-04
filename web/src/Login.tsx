@@ -10,7 +10,7 @@ function Login() {
   const navigate = useNavigate();
 
   const login = () => {
-    invoke("check_envelope", { password })
+    invoke("local_login", { password })
       .then((resp) => {
         setIsLoggedIn(true);
         toast.success("Successfully logged in!");

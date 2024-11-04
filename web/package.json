@@ -16,7 +16,8 @@
     "react-dom": "^18.3.1",
     "react-hot-toast": "^2.4.1",
     "react-loading-skeleton": "^3.5.0",
-    "react-router-dom": "^6.27.0"
+    "react-router-dom": "^6.27.0",
+    "use-debounce": "^10.0.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
