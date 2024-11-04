@@ -7,6 +7,7 @@ use chacha20poly1305::{
 use derive_more::Display;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
@@ -126,9 +127,12 @@ pub struct RegFinishRequest {
     pub(crate) signature: Signature,
 }
 
+#[serde_as]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct Envelope {
     pub(crate) keypair: Keypair,
+    #[serde_as(as = "Bytes")]
+    pub(crate) libp2p_keypair_bytes: [u8; 64],
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
 }
@@ -144,6 +148,7 @@ impl P2POpaqueNode {
     pub fn local_registration_finish(
         &mut self,
         password: String,
+        libp2p_keypair_bytes: [u8; 64],
         peer_resp: RegStartResponse,
     ) -> Result<RegFinishRequest, P2POpaqueError> {
         if let None = self.oprf_client {
@@ -168,6 +173,7 @@ impl P2POpaqueNode {
         let nonce = Nonce::from_slice(&nonce_bytes);
         let envelope = Envelope {
             keypair: self.keypair.clone(),
+            libp2p_keypair_bytes,
             peer_public_key: peer_resp.peer_public_key,
             peer_id: peer_resp.peer_id,
         };
@@ -295,7 +301,7 @@ impl P2POpaqueNode {
         &self,
         password: String,
         peer_resp: LoginStartResponse,
-    ) -> Result<Keypair, P2POpaqueError> {
+    ) -> Result<(Keypair, [u8; 64]), P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
                 "OPRF client not initialized".to_string(),
@@ -329,7 +335,7 @@ impl P2POpaqueNode {
             ));
         }
         let plaintext = plaintext.unwrap();
-        Ok(plaintext.keypair)
+        Ok((plaintext.keypair, plaintext.libp2p_keypair_bytes))
     }
 }
 

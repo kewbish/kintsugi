@@ -28,7 +28,8 @@ use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
 use local_envelope::{LocalEncryptedEnvelope, LocalEnvelope};
-use opaque::{EncryptedEnvelope, Envelope, P2POpaqueError};
+use opaque::{EncryptedEnvelope, Envelope, P2POpaqueError, P2POpaqueNode};
+use oprf::OPRFClient;
 use polynomial::Polynomial;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -55,6 +56,7 @@ struct NodeState {
     peer_id: PeerId,
     index: i32,
     opaque_keypair: Keypair,
+    libp2p_keypair_bytes: [u8; 64],
     known_peer_ids: HashSet<PeerId>,
     peer_id_to_index: HashMap<PeerId, i32>,
     broadcast_topic: IdentTopic,                   // for broadcasting
@@ -65,6 +67,7 @@ struct NodeState {
     aba_states: HashMap<i32, ABANodeState>,
     dkg_states: HashMap<i32, DKGNodeState>,
     acss_inputs: ACSSInputs,
+    opaque_node: P2POpaqueNode,
 }
 
 #[derive(Debug, Clone)]
@@ -394,6 +397,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_id_to_index: HashMap::new(), // temp
         index: 0,
         opaque_keypair: Keypair::new(),
+        libp2p_keypair_bytes: [0u8; 64],
         broadcast_topic: IdentTopic::new("temp"),
         broadcast_topics: HashMap::new(),
         point_to_point_topics: HashMap::new(),
@@ -406,6 +410,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             degree: 1,
             peer_public_keys: HashMap::new(),
         },
+        opaque_node: P2POpaqueNode::new("".to_string()),
     };
     let state_arc = Arc::new(Mutex::new(state));
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
@@ -1383,7 +1388,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     #[tauri::command]
-    fn save_envelope(state: State<TauriState>, password: String) -> Result<(), String> {
+    fn local_register(state: State<TauriState>, password: String) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
         let file_path = "tmp/login.envelope".to_string();
         if Path::new(&file_path).exists() {
@@ -1431,8 +1436,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
+    fn update_with_peer_id(
+        node_state: &mut NodeState,
+        keypair: Keypair,
+        libp2p_keypair_bytes: [u8; 64],
+        tx: mpsc::Sender<TauriToRustCommand>,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
+        node_state.peer_id = peer_id;
+        node_state.opaque_node.id = node_state.peer_id.to_string();
+        node_state.known_peer_ids = HashSet::from([node_state.peer_id]);
+        node_state.peer_id_to_index = HashMap::from([(node_state.peer_id, node_state.index)]);
+        node_state.broadcast_topic = IdentTopic::new(format!("{}", node_state.peer_id));
+        println!(
+            "Peer ID is {} + index is {}",
+            node_state.peer_id, node_state.index
+        );
+        let libp2p_keypair =
+            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut libp2p_keypair_bytes.clone());
+        if let Err(e) = libp2p_keypair {
+            return Err(e.to_string());
+        }
+        node_state.opaque_keypair = keypair.clone();
+        node_state.libp2p_keypair_bytes = libp2p_keypair_bytes;
+        node_state.opaque_node.keypair = keypair;
+        tokio::spawn(async move {
+            tx.send(TauriToRustCommand::NewSwarm(libp2p_keypair.unwrap()))
+                .await
+                .unwrap();
+        });
+        Ok(())
+    }
+
     #[tauri::command]
-    fn check_envelope(state: State<TauriState>, password: String) -> Result<bool, String> {
+    fn local_login(state: State<TauriState>, password: String) -> Result<bool, String> {
         let mut node_state = state.0.lock().unwrap();
         let file_path = "tmp/login.envelope".to_string();
         if !Path::new(&file_path).exists() {
@@ -1456,28 +1493,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = peer_id {
             return Err(e.to_string());
         } else {
-            node_state.peer_id = peer_id.unwrap();
-            node_state.known_peer_ids = HashSet::from([node_state.peer_id]);
-            node_state.peer_id_to_index = HashMap::from([(node_state.peer_id, node_state.index)]);
-            node_state.broadcast_topic = IdentTopic::new(format!("{}", node_state.peer_id));
-            println!(
-                "Peer ID is {} + index is {}",
-                node_state.peer_id, node_state.index
-            );
-            let tx_clone = state.1.clone();
-            let keypair = libp2p::identity::ed25519::Keypair::try_from_bytes(
-                &mut envelope.libp2p_keypair_bytes.clone(),
-            );
-            if let Err(e) = keypair {
-                return Err(e.to_string());
-            }
-            node_state.opaque_keypair = envelope.keypair;
-            tokio::spawn(async move {
-                tx_clone
-                    .send(TauriToRustCommand::NewSwarm(keypair.unwrap()))
-                    .await
-                    .unwrap();
-            });
+            update_with_peer_id(
+                &mut node_state,
+                envelope.keypair,
+                envelope.libp2p_keypair_bytes,
+                state.1.clone(),
+                peer_id.unwrap(),
+            )?;
         }
         Ok(true)
     }
@@ -1557,13 +1579,119 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(notepad.unwrap().to_string())
     }
 
+    #[tauri::command]
+    fn local_login_start(state: State<TauriState>, password: String) -> Result<String, String> {
+        let mut node_state = state.0.lock().unwrap();
+        let result = node_state.opaque_node.local_login_start(password);
+        if let Err(e) = result {
+            return Err(e.to_string());
+        }
+        let result = result.unwrap();
+        let serialized = serde_json::to_string(&result);
+        if let Err(e) = serialized {
+            return Err(e.to_string());
+        }
+        return Ok(serialized.unwrap());
+    }
+
+    #[tauri::command]
+    fn local_login_finish(
+        state: State<TauriState>,
+        password: String,
+        peer_resp: String,
+    ) -> Result<(), String> {
+        let deserialized_peer_resp = serde_json::from_str(&peer_resp);
+        if let Err(e) = deserialized_peer_resp {
+            return Err(e.to_string());
+        }
+
+        let mut node_state = state.0.lock().unwrap();
+        let result = node_state
+            .opaque_node
+            .local_login_finish(password, deserialized_peer_resp.unwrap());
+        if let Err(e) = result {
+            return Err(e.to_string());
+        }
+        let result = result.unwrap();
+
+        node_state.opaque_keypair = result.0.clone();
+        let libp2p_keypair =
+            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut result.1.clone());
+        if let Err(e) = libp2p_keypair {
+            return Err(e.to_string());
+        }
+
+        let peer_id = PeerId::from_public_key(
+            &libp2p::identity::Keypair::from(libp2p_keypair.unwrap()).public(),
+        );
+
+        update_with_peer_id(
+            &mut node_state,
+            result.0,
+            result.1,
+            state.1.clone(),
+            peer_id,
+        )?;
+
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn local_registration_start(
+        state: State<TauriState>,
+        password: String,
+    ) -> Result<String, String> {
+        let mut node_state = state.0.lock().unwrap();
+        let result = node_state.opaque_node.local_registration_start(password);
+        if let Err(e) = result {
+            return Err(e.to_string());
+        }
+        let result = result.unwrap();
+        let serialized = serde_json::to_string(&result);
+        if let Err(e) = serialized {
+            return Err(e.to_string());
+        }
+        return Ok(serialized.unwrap());
+    }
+
+    #[tauri::command]
+    fn local_registration_finish(
+        state: State<TauriState>,
+        password: String,
+        peer_resp: String,
+    ) -> Result<String, String> {
+        let deserialized_peer_resp = serde_json::from_str(&peer_resp);
+        if let Err(e) = deserialized_peer_resp {
+            return Err(e.to_string());
+        }
+
+        let mut node_state = state.0.lock().unwrap();
+        let libp2p_keypair_bytes = node_state.libp2p_keypair_bytes.clone();
+        let result = node_state.opaque_node.local_registration_finish(
+            password,
+            libp2p_keypair_bytes,
+            deserialized_peer_resp.unwrap(),
+        );
+        if let Err(e) = result {
+            return Err(e.to_string());
+        }
+        let result = result.unwrap();
+        let serialized = serde_json::to_string(&result);
+        if let Err(e) = serialized {
+            return Err(e.to_string());
+        }
+        return Ok(serialized.unwrap());
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_peer_id,
-            save_envelope,
-            check_envelope,
+            local_register,
+            local_login,
             read_notepad,
-            save_notepad
+            save_notepad,
+            local_login_start,
+            local_login_finish,
         ])
         .manage(TauriState(Arc::clone(&state_arc), tx))
         .run(tauri::generate_context!())

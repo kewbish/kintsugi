@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{opaque::P2POpaqueError, polynomial};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OPRFClient {
     current_blinding_scalar: Option<Scalar>,
 }
