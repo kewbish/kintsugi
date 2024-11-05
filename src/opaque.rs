@@ -1,15 +1,20 @@
 use crate::keypair::{Keypair, PublicKey};
+use crate::oprf::{OPRFClient, OPRFServer};
+use crate::polynomial::get_lagrange_coefficient;
 use crate::signature::Signature;
+use crate::util::i32_to_scalar;
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::{RistrettoPoint, Scalar};
 use derive_more::Display;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_with::{serde_as, Bytes};
-use sha3::{Digest, Sha3_256};
-use std::collections::HashMap;
+use sha3::{Digest, Sha3_256, Sha3_256Core, Sha3_512};
+use std::collections::{HashMap, HashSet};
 use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
 
 type CS = voprf::Ristretto255;
@@ -35,7 +40,7 @@ pub struct P2POpaqueNode {
     pub(crate) peer_opaque_keys: HashMap<String, Keypair>,
     pub(crate) peer_attempted_public_keys: HashMap<String, PublicKey>,
     pub(crate) envelopes: HashMap<String, EncryptedEnvelope>,
-    pub(crate) oprf_client: Option<OprfClient<CS>>,
+    pub(crate) oprf_client: Option<OPRFClient>,
 }
 
 impl P2POpaqueNode {
@@ -53,7 +58,7 @@ impl P2POpaqueNode {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct RegStartRequest {
-    pub(crate) blinded_pwd: BlindedElement<CS>,
+    pub(crate) blinded_pwd: RistrettoPoint,
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
 }
@@ -63,17 +68,12 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
     ) -> Result<RegStartRequest, P2POpaqueError> {
-        let mut rng = OsRng;
-        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng);
-        if let Err(e) = password_blind_result {
-            return Err(P2POpaqueError::CryptoError(
-                "OPRF client blinding failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let password_blind_ok = password_blind_result.unwrap();
-        self.oprf_client = Some(password_blind_ok.state);
+        let password_scalar = Scalar::hash_from_bytes::<Sha3_512>(password.as_bytes());
+        let (password_blind_result, state) =
+            OPRFClient::blind(password_scalar * RISTRETTO_BASEPOINT_POINT);
+        self.oprf_client = Some(state);
         Ok(RegStartRequest {
-            blinded_pwd: password_blind_ok.message,
+            blinded_pwd: password_blind_result,
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
         })
@@ -81,8 +81,16 @@ impl P2POpaqueNode {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct RegStartNodeRequest {
+    reg_start_req: RegStartRequest,
+    index: i32,
+    other_indices: HashSet<i32>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct RegStartResponse {
-    pub(crate) rwd: EvaluationElement<CS>,
+    pub(crate) rwd: RistrettoPoint,
+    pub(crate) index: i32,
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
 }
@@ -90,28 +98,42 @@ pub struct RegStartResponse {
 impl P2POpaqueNode {
     pub fn peer_registration_start(
         &mut self,
-        peer_req: RegStartRequest,
+        peer_req: RegStartNodeRequest,
     ) -> Result<RegStartResponse, P2POpaqueError> {
         let opaque_keypair = Keypair::new();
-        self.peer_opaque_keys
-            .insert(peer_req.peer_id.clone(), opaque_keypair.clone());
+        self.peer_opaque_keys.insert(
+            peer_req.reg_start_req.peer_id.clone(),
+            opaque_keypair.clone(),
+        );
         if self
             .peer_attempted_public_keys
-            .contains_key(&peer_req.peer_id)
+            .contains_key(&peer_req.reg_start_req.peer_id)
         {
             return Err(P2POpaqueError::RegistrationError);
         }
-        self.peer_attempted_public_keys
-            .insert(peer_req.peer_id, peer_req.peer_public_key);
-        let server = OprfServer::<CS>::new_with_key(&opaque_keypair.private_key);
-        if let Err(e) = server {
+        self.peer_attempted_public_keys.insert(
+            peer_req.reg_start_req.peer_id,
+            peer_req.reg_start_req.peer_public_key,
+        );
+        let private_key = Scalar::from_canonical_bytes(opaque_keypair.private_key).into_option();
+        if let None = private_key {
             return Err(P2POpaqueError::CryptoError(
-                "OPRF server creation failed: ".to_string() + &e.to_string(),
+                "Could not deserialize private key".to_string(),
             ));
         }
-        let password_blind_eval = server.unwrap().blind_evaluate(&peer_req.blinded_pwd);
+        let password_blind_eval = OPRFServer::blind_evaluate(
+            peer_req.reg_start_req.blinded_pwd,
+            private_key.unwrap(),
+            i32_to_scalar(peer_req.index),
+            peer_req
+                .other_indices
+                .iter()
+                .map(|i| i32_to_scalar(i.clone()))
+                .collect(),
+        );
         Ok(RegStartResponse {
             rwd: password_blind_eval,
+            index: peer_req.index,
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
         })
@@ -149,56 +171,72 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
         libp2p_keypair_bytes: [u8; 64],
-        peer_resp: RegStartResponse,
-    ) -> Result<RegFinishRequest, P2POpaqueError> {
+        peer_resp: Vec<RegStartResponse>,
+    ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
                 "OPRF client not initialized".to_string(),
             ));
         }
+        let all_indices: HashSet<Scalar> = peer_resp
+            .iter()
+            .map(|resp| i32_to_scalar(resp.index.clone()))
+            .collect();
+        let combined_rwd = peer_resp
+            .iter()
+            .map(|resp| {
+                get_lagrange_coefficient(i32_to_scalar(resp.index.clone()), all_indices.clone())
+                    * resp.rwd
+            })
+            .sum();
         let oprf_client = self.oprf_client.as_ref().unwrap();
-        let unblinded_rwd = oprf_client.finalize(&password.as_bytes(), &peer_resp.rwd);
+        let unblinded_rwd = oprf_client.unblind(combined_rwd);
         if let Err(e) = unblinded_rwd {
             return Err(P2POpaqueError::CryptoError(
                 "Unblinding failed: ".to_string() + &e.to_string(),
             ));
         }
-        let unblinded_rwd = unblinded_rwd.unwrap();
         let mut hasher = Sha3_256::new();
-        hasher.update(unblinded_rwd.as_slice());
+        hasher.update(unblinded_rwd.unwrap().compress().to_bytes());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let envelope = Envelope {
-            keypair: self.keypair.clone(),
-            libp2p_keypair_bytes,
-            peer_public_key: peer_resp.peer_public_key,
-            peer_id: peer_resp.peer_id,
-        };
-        let plaintext = serde_json::to_string(&envelope);
-        if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
-                "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
-        if let Err(e) = ciphertext {
-            return Err(P2POpaqueError::CryptoError(
-                "Encryption of envelope failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let ciphertext = ciphertext.unwrap();
-        let signature = Signature::new_with_keypair(&ciphertext, self.keypair.clone());
 
-        Ok(RegFinishRequest {
-            peer_id: self.id.clone(),
-            peer_public_key: self.keypair.public_key,
-            encrypted_envelope: ciphertext,
-            nonce: nonce_bytes,
-            signature,
-        })
+        let mut result = Vec::new();
+        for peer_resp in peer_resp.iter() {
+            let envelope = Envelope {
+                keypair: self.keypair.clone(),
+                libp2p_keypair_bytes,
+                peer_public_key: peer_resp.peer_public_key,
+                peer_id: peer_resp.peer_id.clone(),
+            };
+            let plaintext = serde_json::to_string(&envelope);
+            if let Err(e) = plaintext {
+                return Err(P2POpaqueError::SerializationError(
+                    "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
+                ));
+            }
+            let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
+            if let Err(e) = ciphertext {
+                return Err(P2POpaqueError::CryptoError(
+                    "Encryption of envelope failed: ".to_string() + &e.to_string(),
+                ));
+            }
+            let ciphertext = ciphertext.unwrap();
+            let signature = Signature::new_with_keypair(&ciphertext, self.keypair.clone());
+
+            result.push(RegFinishRequest {
+                peer_id: self.id.clone(),
+                peer_public_key: self.keypair.public_key,
+                encrypted_envelope: ciphertext,
+                nonce: nonce_bytes,
+                signature,
+            })
+        }
+
+        Ok(result)
     }
 }
 
@@ -234,7 +272,7 @@ impl P2POpaqueNode {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct LoginStartRequest {
-    pub(crate) blinded_pwd: BlindedElement<CS>,
+    pub(crate) blinded_pwd: RistrettoPoint,
     pub(crate) peer_id: String,
 }
 
@@ -243,25 +281,28 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
     ) -> Result<LoginStartRequest, P2POpaqueError> {
-        let mut rng = OsRng;
-        let password_blind_result = OprfClient::<CS>::blind(password.as_bytes(), &mut rng);
-        if let Err(e) = password_blind_result {
-            return Err(P2POpaqueError::CryptoError(
-                "OPRF client blinding failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let password_blind_ok = password_blind_result.unwrap();
-        self.oprf_client = Some(password_blind_ok.state);
+        let password_scalar = Scalar::hash_from_bytes::<Sha3_512>(password.as_bytes());
+        let (password_blind_result, state) =
+            OPRFClient::blind(password_scalar * RISTRETTO_BASEPOINT_POINT);
+        self.oprf_client = Some(state);
         Ok(LoginStartRequest {
-            blinded_pwd: password_blind_ok.message,
+            blinded_pwd: password_blind_result,
             peer_id: self.id.clone(),
         })
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct LoginStartNodeRequest {
+    login_start_req: LoginStartRequest,
+    index: i32,
+    other_indices: HashSet<i32>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct LoginStartResponse {
-    pub(crate) rwd: EvaluationElement<CS>,
+    pub(crate) rwd: RistrettoPoint,
+    pub(crate) index: i32,
     pub(crate) envelope: EncryptedEnvelope,
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
@@ -270,25 +311,31 @@ pub struct LoginStartResponse {
 impl P2POpaqueNode {
     pub fn peer_login_start(
         &self,
-        peer_req: LoginStartRequest,
+        peer_req: LoginStartNodeRequest,
     ) -> Result<LoginStartResponse, P2POpaqueError> {
-        let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.peer_id);
+        let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.login_start_req.peer_id);
         if let None = local_opaque_keypair {
             return Err(P2POpaqueError::RegistrationError);
         }
-        let envelope = self.envelopes.get(&peer_req.peer_id);
+        let envelope = self.envelopes.get(&peer_req.login_start_req.peer_id);
         if let None = envelope {
             return Err(P2POpaqueError::RegistrationError);
         }
-        let server = OprfServer::<CS>::new_with_key(&local_opaque_keypair.unwrap().private_key);
-        if let Err(e) = server {
-            return Err(P2POpaqueError::CryptoError(
-                "OPRF server creation failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let password_blind_eval = server.unwrap().blind_evaluate(&peer_req.blinded_pwd);
+        let private_key =
+            Scalar::from_canonical_bytes(local_opaque_keypair.unwrap().private_key).into_option();
+        let password_blind_eval = OPRFServer::blind_evaluate(
+            peer_req.login_start_req.blinded_pwd,
+            private_key.unwrap(),
+            i32_to_scalar(peer_req.index),
+            peer_req
+                .other_indices
+                .iter()
+                .map(|i| i32_to_scalar(i.clone()))
+                .collect(),
+        );
         Ok(LoginStartResponse {
             rwd: password_blind_eval,
+            index: peer_req.index,
             envelope: envelope.unwrap().clone(),
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
@@ -300,15 +347,27 @@ impl P2POpaqueNode {
     pub fn local_login_finish(
         &self,
         password: String,
-        peer_resp: LoginStartResponse,
+        libp2p_keypair_bytes: [u8; 64],
+        peer_resp: Vec<LoginStartResponse>,
     ) -> Result<(Keypair, [u8; 64]), P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
                 "OPRF client not initialized".to_string(),
             ));
         }
+        let all_indices: HashSet<Scalar> = peer_resp
+            .iter()
+            .map(|resp| i32_to_scalar(resp.index.clone()))
+            .collect();
+        let combined_rwd = peer_resp
+            .iter()
+            .map(|resp| {
+                get_lagrange_coefficient(i32_to_scalar(resp.index.clone()), all_indices.clone())
+                    * resp.rwd
+            })
+            .sum();
         let oprf_client = self.oprf_client.as_ref().unwrap();
-        let unblinded_rwd = oprf_client.finalize(&password.as_bytes(), &peer_resp.rwd);
+        let unblinded_rwd = oprf_client.unblind(combined_rwd);
         if let Err(e) = unblinded_rwd {
             return Err(P2POpaqueError::CryptoError(
                 "Unblinding failed: ".to_string() + &e.to_string(),
@@ -316,12 +375,13 @@ impl P2POpaqueNode {
         }
         let unblinded_rwd = unblinded_rwd.unwrap();
         let mut hasher = Sha3_256::new();
-        hasher.update(unblinded_rwd.as_slice());
+        hasher.update(unblinded_rwd.compress().to_bytes());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let nonce_bytes = peer_resp.envelope.nonce;
+        let nonce_bytes = peer_resp[0].envelope.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext_bytes = cipher.decrypt(nonce, peer_resp.envelope.encrypted_envelope.as_ref());
+        let plaintext_bytes =
+            cipher.decrypt(nonce, peer_resp[0].envelope.encrypted_envelope.as_ref());
         if let Err(e) = plaintext_bytes {
             return Err(P2POpaqueError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),

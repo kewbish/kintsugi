@@ -1598,17 +1598,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn local_login_finish(
         state: State<TauriState>,
         password: String,
-        peer_resp: String,
+        peer_resp: Vec<String>,
     ) -> Result<(), String> {
-        let deserialized_peer_resp = serde_json::from_str(&peer_resp);
-        if let Err(e) = deserialized_peer_resp {
-            return Err(e.to_string());
+        let mut result = Vec::new();
+        for peer_resp in peer_resp.iter() {
+            let deserialized_peer_resp = serde_json::from_str(&peer_resp);
+            if let Err(e) = deserialized_peer_resp {
+                return Err(e.to_string());
+            }
+            result.push(deserialized_peer_resp.unwrap());
         }
 
         let mut node_state = state.0.lock().unwrap();
-        let result = node_state
-            .opaque_node
-            .local_login_finish(password, deserialized_peer_resp.unwrap());
+        let result = node_state.opaque_node.local_login_finish(
+            password,
+            node_state.libp2p_keypair_bytes.clone(),
+            result,
+        );
         if let Err(e) = result {
             return Err(e.to_string());
         }
