@@ -56,8 +56,9 @@ const PeerRecovery = () => {
           borderRadius={"1em"}
         />
       )}
+      <hr style={{ margin: 0, marginTop: "0.5em", alignSelf: "stretch" }} />
       <p>
-        Enter the envelope your contact has send you, then send this output back
+        Enter the envelope your contact has sent you, then send this output back
         via email, messenger, or another communication medium you trust.
       </p>
       <div
