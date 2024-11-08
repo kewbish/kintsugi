@@ -33,7 +33,7 @@ const router = createBrowserRouter([
     element: <ContactSelection />,
   },
   {
-    path: "/recovery/contacts/:peer",
+    path: "/recovery/contacts",
     element: (
       // TODO - readd auth
       <Recovery />
