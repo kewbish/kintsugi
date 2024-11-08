@@ -10,6 +10,8 @@ import "react-loading-skeleton/dist/skeleton.css";
 import Register from "./Register";
 import { AuthProvider } from "./components/AuthContext";
 import RequiresAuth from "./components/RequiresAuth";
+import PeerRecovery from "./PeerRecovery";
+import PeerRegistration from "./PeerRegistration";
 
 const router = createBrowserRouter([
   {
@@ -37,6 +39,20 @@ const router = createBrowserRouter([
     element: (
       // TODO - readd auth
       <Recovery />
+    ),
+  },
+  {
+    path: "/recovery/peers",
+    element: (
+      // TODO - readd auth
+      <PeerRecovery />
+    ),
+  },
+  {
+    path: "/register/peers",
+    element: (
+      // TODO - readd auth
+      <PeerRegistration />
     ),
   },
 ]);
