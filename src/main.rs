@@ -307,6 +307,8 @@ struct P2PBehaviour {
 
 enum TauriToRustCommand {
     NewSwarm(libp2p::identity::ed25519::Keypair),
+    AddPeer(String),
+    RemovePeer(String),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1327,6 +1329,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(state.clone())
     }
 
+    fn update_peer_ids(state_arc: Arc<Mutex<NodeState>>) -> Result<(), Box<dyn Error>> {
+        let state = state_arc.lock().unwrap();
+        let serialized_peers = serde_json::to_string(&state.known_peer_ids)?;
+        let file_path = "tmp/peers.list".to_string();
+        let mut file = fs::File::create(file_path)?;
+        file.write_all(serialized_peers.as_bytes())?;
+        Ok(())
+    }
+
     fn add_peer(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
@@ -1385,6 +1396,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn get_peer_id(state: State<TauriState>) -> String {
         let node_state = state.0.lock().unwrap();
         node_state.peer_id.to_string()
+    }
+
+    #[tauri::command]
+    fn get_peers(state: State<TauriState>) -> Vec<PeerId> {
+        let node_state = state.0.lock().unwrap();
+        return Vec::from_iter(node_state.known_peer_ids.clone());
+    }
+
+    #[tauri::command]
+    fn add_peer_tauri(state: State<TauriState>, peer: String) -> Result<(), String> {
+        let tx_clone = state.1.clone();
+        tokio::spawn(async move {
+            tx_clone
+                .send(TauriToRustCommand::AddPeer(peer))
+                .await
+                .unwrap();
+        });
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn remove_peer_tauri(state: State<TauriState>, peer: String) -> Result<(), String> {
+        let tx_clone = state.1.clone();
+        tokio::spawn(async move {
+            tx_clone
+                .send(TauriToRustCommand::RemovePeer(peer))
+                .await
+                .unwrap();
+        });
+        Ok(())
     }
 
     #[tauri::command]
@@ -1460,6 +1501,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_state.opaque_keypair = keypair.clone();
         node_state.libp2p_keypair_bytes = libp2p_keypair_bytes;
         node_state.opaque_node.keypair = keypair;
+
+        if node_state.known_peer_ids.len() == 0 {
+            let file_path = "tmp/peers.list".to_string();
+            if Path::new(&file_path).exists() {
+                let contents = std::fs::read_to_string(file_path);
+                if let Err(e) = contents {
+                    return Err(e.to_string());
+                }
+                let peers_list: Result<HashSet<PeerId>, _> =
+                    serde_json::from_str(&contents.unwrap());
+                if let Err(e) = peers_list {
+                    return Err(e.to_string());
+                }
+                node_state.known_peer_ids = peers_list.unwrap();
+            }
+        }
+
         tokio::spawn(async move {
             tx.send(TauriToRustCommand::NewSwarm(libp2p_keypair.unwrap()))
                 .await
@@ -1698,6 +1756,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             save_notepad,
             local_login_start,
             local_login_finish,
+            get_peers,
+            add_peer_tauri,
+            remove_peer_tauri,
         ])
         .manage(TauriState(Arc::clone(&state_arc), tx))
         .run(tauri::generate_context!())
@@ -1712,23 +1773,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 TauriToRustCommand::NewSwarm(keypair) => {
                     swarm = new_swarm(keypair)?;
                 }
+                TauriToRustCommand::AddPeer(peer) => {
+                    let peer_id = PeerId::from_str(&peer)?;
+                    add_peer(state_arc.clone(), &mut swarm, peer_id)?;
+                    update_peer_ids(state_arc.clone())?;
+                }
+                TauriToRustCommand::RemovePeer(peer) => {
+                    let peer_id = PeerId::from_str(&peer)?;
+                    remove_peer(state_arc.clone(), &mut swarm, peer_id)?;
+                    update_peer_ids(state_arc.clone())?;
+                }
             },
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
                     add_peer(state_arc.clone(), &mut swarm, peer)?;
+                    update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::UnroutablePeer { peer })) => {
                     remove_peer(state_arc.clone(), &mut swarm, peer)?;
+                    update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer, _multiaddr) in list {
                         add_peer(state_arc.clone(), &mut swarm, peer)?;
                     }
+                    update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer, _multiaddr) in list {
                         remove_peer(state_arc.clone(), &mut swarm, peer)?;
                     }
+                    update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
