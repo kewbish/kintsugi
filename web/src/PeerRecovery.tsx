@@ -1,6 +1,6 @@
 import { useState } from "react";
 import Skeleton from "react-loading-skeleton";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import CopyableCodeblock from "./components/CopyableCodeblock";
 import User from "./components/User";
 
@@ -11,8 +11,9 @@ const PeerRecovery = () => {
     "/dnsaddr/bootstrap.libp2p.io/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
     "/dnsaddr/bootstrap.libp2p.io/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
   ];
+  const { initialSelectedPeer } = useParams();
   const [peers, setPeers] = useState(PEERS);
-  const [selectedPeer, setSelectedPeer] = useState("");
+  const [selectedPeer, setSelectedPeer] = useState(initialSelectedPeer ?? "");
   const [envelope, setEnvelope] = useState("");
   const [result, setResult] = useState("");
 

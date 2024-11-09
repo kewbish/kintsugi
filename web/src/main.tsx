@@ -49,6 +49,13 @@ const router = createBrowserRouter([
     ),
   },
   {
+    path: "/recovery/peers/:initialSelectedPeer",
+    element: (
+      // TODO - readd auth
+      <PeerRecovery />
+    ),
+  },
+  {
     path: "/register/peers",
     element: (
       // TODO - readd auth
