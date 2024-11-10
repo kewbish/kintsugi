@@ -312,6 +312,8 @@ enum TauriToRustCommand {
     NewSwarm(libp2p::identity::ed25519::Keypair),
     AddPeer(String),
     RemovePeer(String),
+    BroadcastMessage(BroadcastMessage),
+    SendMessageToPeer(BroadcastMessage, PeerId),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1855,6 +1857,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(serialized.unwrap());
     }
 
+    fn tauri_broadcast_message(
+        state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+        message: BroadcastMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let serialized_msg = serde_json::to_vec(&message)?;
+        let state = state_arc.lock().unwrap();
+        if let Err(e) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(state.broadcast_topic.clone(), serialized_msg)
+        {
+            return Err(Box::new(e));
+        }
+        Ok(())
+    }
+
+    fn tauri_send_message_to_peer(
+        state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+        message: BroadcastMessage,
+        peer_id: PeerId,
+    ) -> Result<(), Box<dyn Error>> {
+        let serialized_msg = serde_json::to_vec(&message)?;
+        let state = state_arc.lock().unwrap();
+        let topic = state.point_to_point_topics.get(&peer_id).unwrap();
+        if let Err(e) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), serialized_msg)
+        {
+            return Err(Box::new(e));
+        }
+        Ok(())
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_peer_id,
@@ -1895,6 +1933,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let peer_id = PeerId::from_str(&peer)?;
                     remove_peer(state_arc.clone(), &mut swarm, peer_id)?;
                     update_peer_ids(state_arc.clone())?;
+                },
+                TauriToRustCommand::BroadcastMessage(msg) => {
+                    tauri_broadcast_message(state_arc.clone(), &mut swarm, msg)?;
+                }
+                TauriToRustCommand::SendMessageToPeer(msg, peer_id) => {
+                    tauri_send_message_to_peer(state_arc.clone(), &mut swarm, msg, peer_id)?;
                 }
             },
             event = swarm.select_next_some() => match event {
