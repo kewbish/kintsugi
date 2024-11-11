@@ -68,9 +68,8 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
     ) -> Result<RegStartRequest, P2POpaqueError> {
-        let password_scalar = Scalar::hash_from_bytes::<Sha3_512>(password.as_bytes());
-        let (password_blind_result, state) =
-            OPRFClient::blind(password_scalar * RISTRETTO_BASEPOINT_POINT);
+        let password_point = RistrettoPoint::hash_from_bytes::<Sha3_512>(password.as_bytes());
+        let (password_blind_result, state) = OPRFClient::blind(password_point);
         self.oprf_client = Some(state);
         Ok(RegStartRequest {
             blinded_pwd: password_blind_result,
@@ -281,9 +280,8 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
     ) -> Result<LoginStartRequest, P2POpaqueError> {
-        let password_scalar = Scalar::hash_from_bytes::<Sha3_512>(password.as_bytes());
-        let (password_blind_result, state) =
-            OPRFClient::blind(password_scalar * RISTRETTO_BASEPOINT_POINT);
+        let password_point = RistrettoPoint::hash_from_bytes::<Sha3_512>(password.as_bytes());
+        let (password_blind_result, state) = OPRFClient::blind(password_point);
         self.oprf_client = Some(state);
         Ok(LoginStartRequest {
             blinded_pwd: password_blind_result,
