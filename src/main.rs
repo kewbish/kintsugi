@@ -16,10 +16,8 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use coin::Coin;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::{RistrettoPoint, Scalar};
-use dkg::{DKGKeyDerivation, DKG};
 use futures::prelude::*;
 use itertools::Itertools;
 use keypair::{Keypair, PublicKey};
@@ -32,7 +30,7 @@ use opaque::{
     EncryptedEnvelope, Envelope, LoginStartNodeRequest, P2POpaqueError, P2POpaqueNode,
     RegFinishRequest, RegStartNodeRequest,
 };
-use oprf::OPRFClient;
+use oprf::{OPRFClient, OPRFServer};
 use polynomial::Polynomial;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -61,12 +59,15 @@ struct NodeState {
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
     known_peer_ids: HashSet<PeerId>,
-    peer_id_to_index: HashMap<PeerId, i32>,
-    broadcast_topic: IdentTopic,                   // for broadcasting
+    peer_id_to_index: HashMap<PeerId, i32>, // this node's recovery nodes' indices
+    broadcast_topic: IdentTopic,            // for broadcasting
     broadcast_topics: HashMap<PeerId, IdentTopic>, // subscribe to these two
     point_to_point_topics: HashMap<PeerId, IdentTopic>,
     acss_inputs: ACSSInputs,
     opaque_node: P2POpaqueNode,
+    peer_recoveries: HashMap<PeerId, (ACSSNodeShare, i32)>, // the indices for nodes for which this node
+    // is a recovery node
+    phi_polynomials: Option<(Polynomial, Polynomial)>,
 }
 
 // --- message structs --- //
@@ -77,21 +78,30 @@ struct IdIndexMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct ACSSShareMessage {
+struct OPRFRegInitMessage {
     inputs: ACSSInputs,
-    dealer_shares_a: HashMap<PeerId, ACSSDealerShare>,
-    dealer_shares_b: HashMap<PeerId, ACSSDealerShare>,
+    blinded_point: RistrettoPoint,
+    dealer_shares: HashMap<PeerId, ACSSDealerShare>,
     dealer_key: PublicKey,
-    current_index: i32,
-    current_id: PeerId,
-    wrt_index: i32,
-    wrt_id: PeerId,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct OPRFRegStartRespMessage {
+    blind_evaluation: RistrettoPoint,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
 }
 
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     IdIndexMessage(IdIndexMessage),
-    ACSSShareMessage(ACSSShareMessage),
+    OPRFRegInitMessage(OPRFRegInitMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -208,6 +218,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer_public_keys: HashMap::new(),
         },
         opaque_node: P2POpaqueNode::new("".to_string()),
+        peer_recoveries: HashMap::new(),
+        phi_polynomials: None,
     };
     let state_arc = Arc::new(Mutex::new(state));
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
@@ -254,88 +266,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 state.peer_id_to_index.insert(peer_id, msg.index);
                 Ok(())
             }
-            BroadcastMessage::ACSSShareMessage(msg) => {
-                handle_message_acss_share(&mut state, swarm, peer_id, msg)
+            BroadcastMessage::OPRFRegInitMessage(msg) => {
+                handle_message_reg_init(&mut state, swarm, peer_id, msg)
             }
         }
-    }
-
-    fn handle_message_acss_share(
-        state: &mut NodeState,
-        swarm: &mut Swarm<P2PBehaviour>,
-        peer_id: PeerId,
-        message: ACSSShareMessage,
-    ) -> Result<(), Box<dyn Error>> {
-        let node_share_a = ACSS::share(
-            message.inputs.clone(),
-            message.dealer_shares_a.get(&state.peer_id).unwrap().clone(),
-            state.opaque_keypair.clone(),
-            message.dealer_key,
-        )?;
-        let node_share_b = ACSS::share(
-            message.inputs,
-            message.dealer_shares_b.get(&state.peer_id).unwrap().clone(),
-            state.opaque_keypair.clone(),
-            message.dealer_key,
-        )?;
-
-        /*let mut dkg_state = state
-            .dkg_states
-            .entry(message.wrt_index)
-            .or_insert(DKGNodeState::new())
-            .clone();
-        dkg_state.secret_share_a = Some(node_share_a);
-        dkg_state.secret_share_b = Some(node_share_b);*/
-
-        let topic = state
-            .point_to_point_topics
-            .get(&message.current_id)
-            .unwrap()
-            .clone();
-        let mut combined_comm_vec = message
-            .dealer_shares_a
-            .get(&state.peer_id)
-            .unwrap()
-            .clone()
-            .poly_c_i
-            .clone();
-        combined_comm_vec.extend(
-            message
-                .dealer_shares_b
-                .get(&state.peer_id)
-                .unwrap()
-                .clone()
-                .poly_c_i,
-        );
-        // dkg_state.combined_comm_vec = Some(combined_comm_vec.clone());
-        /*let acss_share_message = serde_json::to_vec(&ACSSAckMessage {
-            poly_comm: combined_comm_vec,
-            current_index: state.index,
-            current_id: state.peer_id,
-            wrt_index: message.wrt_index,
-            wrt_id: message.wrt_id,
-        })
-        .unwrap();
-        if let Err(e) = swarm
-            .behaviour_mut()
-            .gossipsub
-            .publish(topic.clone(), acss_share_message)
-        {
-            println!("Publish error: {e:?}");
-        } else {
-            println!("[ACSS] Published acknowledgement message");
-        }*/
-
-        // state.dkg_states.insert(message.wrt_index, dkg_state);
-
-        Ok(())
     }
 
     fn handle_init(
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
-        wrt_index: i32,
-        wrt_id: PeerId,
+        password: String,
+        node_index: i32,
+        node_id: PeerId,
     ) -> Result<NodeState, Box<dyn Error>> {
         for peer_id in state.known_peer_ids.iter() {
             let topic = state.point_to_point_topics.get(&peer_id).unwrap();
@@ -351,41 +293,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        let (a, b) = DKG::share();
-        let (a_acss_dealer_share, phi_a, phi_hat_a) = ACSS::share_dealer(
+        let s = Scalar::random(&mut OsRng);
+        let (acss_dealer_share, phi, phi_hat) = ACSS::share_dealer(
             state.acss_inputs.clone(),
-            a,
+            s,
             state.acss_inputs.degree,
             state.opaque_keypair.private_key,
         )?;
-        let (b_acss_dealer_share, phi_b, phi_hat_b) = ACSS::share_dealer(
-            state.acss_inputs.clone(),
-            b,
-            state.acss_inputs.degree,
-            state.opaque_keypair.private_key,
-        )?;
+        state.phi_polynomials = Some((phi, phi_hat));
 
-        /*
-        dkg_state.phi_a = Some(phi_a);
-        dkg_state.phi_b = Some(phi_b);
-        dkg_state.phi_hat_a = Some(phi_hat_a);
-        dkg_state.phi_hat_b = Some(phi_hat_b);*/
+        let reg_start_req = state.opaque_node.local_registration_start(password)?;
 
-        let init_message = serde_json::to_vec(&ACSSShareMessage {
+        let init_message = serde_json::to_vec(&OPRFRegInitMessage {
             inputs: state.acss_inputs.clone(),
-            dealer_shares_a: a_acss_dealer_share
-                .iter()
-                .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
-                .collect(),
-            dealer_shares_b: b_acss_dealer_share
+            blinded_point: reg_start_req.blinded_pwd,
+            dealer_shares: acss_dealer_share
                 .iter()
                 .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
                 .collect(),
             dealer_key: state.opaque_keypair.public_key,
-            current_index: state.index,
-            current_id: state.peer_id,
-            wrt_index,
-            wrt_id,
+            user_index: state.index,
+            user_id: state.peer_id,
+            node_index,
+            node_id,
         })
         .unwrap();
         let message_id = swarm
@@ -395,10 +325,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = message_id {
             println!("Publish error: {e:?}");
         } else {
-            println!("Sending ACSS share messages for index {wrt_index}");
+            println!("[INIT] Sending ACSS share messages for index {node_index}");
         }
 
         Ok(state.clone())
+    }
+
+    fn handle_message_reg_init(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        message: OPRFRegInitMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let node_share = ACSS::share(
+            message.inputs.clone(),
+            message.dealer_shares.get(&state.peer_id).unwrap().clone(),
+            state.opaque_keypair.clone(),
+            message.dealer_key,
+        )?;
+
+        state
+            .peer_recoveries
+            .insert(peer_id, (node_share.clone(), message.node_index));
+
+        let topic = state
+            .point_to_point_topics
+            .get(&message.user_id)
+            .unwrap()
+            .clone();
+        let other_indices = message
+            .dealer_shares
+            .values()
+            .map(|share| i32_to_scalar(share.index.try_into().unwrap()))
+            .collect();
+        let reg_start_resp_message = serde_json::to_vec(&OPRFRegStartRespMessage {
+            blind_evaluation: OPRFServer::blind_evaluate(
+                message.blinded_point,
+                node_share.s_i_d,
+                i32_to_scalar(message.user_index),
+                other_indices,
+            ),
+            user_index: message.node_index,
+            user_id: message.node_id,
+            node_index: state.index,
+            node_id: state.peer_id,
+        })
+        .unwrap();
+        if let Err(e) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), reg_start_resp_message)
+        {
+            println!("Publish error: {e:?}");
+        } else {
+            println!("[REG INIT] Published acknowledgement message");
+        }
+
+        Ok(())
     }
 
     fn update_peer_ids(state_arc: Arc<Mutex<NodeState>>) -> Result<(), Box<dyn Error>> {
