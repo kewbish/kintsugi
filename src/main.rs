@@ -27,8 +27,8 @@ use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
 use local_envelope::{LocalEncryptedEnvelope, LocalEnvelope};
 use opaque::{
-    EncryptedEnvelope, Envelope, LoginStartNodeRequest, P2POpaqueError, P2POpaqueNode,
-    RegFinishRequest, RegStartNodeRequest,
+    EncryptedEnvelope, Envelope, P2POpaqueError, P2POpaqueNode, RegFinishRequest, RegStartRequest,
+    RegStartResponse,
 };
 use oprf::{OPRFClient, OPRFServer};
 use polynomial::Polynomial;
@@ -80,7 +80,7 @@ struct IdIndexMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct OPRFRegInitMessage {
     inputs: ACSSInputs,
-    blinded_point: RistrettoPoint,
+    reg_start_req: RegStartRequest,
     dealer_shares: HashMap<PeerId, ACSSDealerShare>,
     dealer_key: PublicKey,
     user_index: i32,
@@ -91,7 +91,7 @@ struct OPRFRegInitMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct OPRFRegStartRespMessage {
-    blind_evaluation: RistrettoPoint,
+    reg_start_resp: RegStartResponse,
     user_index: i32,
     user_id: PeerId,
     node_index: i32,
@@ -306,7 +306,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let init_message = serde_json::to_vec(&OPRFRegInitMessage {
             inputs: state.acss_inputs.clone(),
-            blinded_point: reg_start_req.blinded_pwd,
+            reg_start_req,
             dealer_shares: acss_dealer_share
                 .iter()
                 .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
@@ -356,15 +356,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let other_indices = message
             .dealer_shares
             .values()
-            .map(|share| i32_to_scalar(share.index.try_into().unwrap()))
+            .map(|share| share.index.try_into().unwrap())
             .collect();
+        let reg_start_resp = state.opaque_node.peer_registration_start(
+            message.reg_start_req,
+            message.user_index,
+            other_indices,
+        )?;
         let reg_start_resp_message = serde_json::to_vec(&OPRFRegStartRespMessage {
-            blind_evaluation: OPRFServer::blind_evaluate(
-                message.blinded_point,
-                node_share.s_i_d,
-                i32_to_scalar(message.user_index),
-                other_indices,
-            ),
+            reg_start_resp,
             user_index: message.node_index,
             user_id: message.node_id,
             node_index: state.index,
@@ -725,6 +725,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     #[tauri::command]
     fn peer_login_start(state: State<TauriState>, peer_req: String) -> Result<String, String> {
+        /*
         let login_start_node_req = serde_json::from_str(&peer_req);
         if let Err(e) = login_start_node_req {
             return Err(e.to_string());
@@ -742,7 +743,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = serialized {
             return Err(e.to_string());
         }
-        return Ok(serialized.unwrap());
+        return Ok(serialized.unwrap());*/
+        Ok("".to_string())
     }
 
     #[tauri::command]
@@ -816,6 +818,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: State<TauriState>,
         peer_req: String,
     ) -> Result<String, String> {
+        /*
         let reg_start_node_req = serde_json::from_str(&peer_req);
         if let Err(e) = reg_start_node_req {
             return Err(e.to_string());
@@ -833,7 +836,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = serialized {
             return Err(e.to_string());
         }
-        return Ok(serialized.unwrap());
+        return Ok(serialized.unwrap());*/
+        Ok("".to_string())
     }
 
     #[tauri::command]

@@ -80,13 +80,6 @@ impl P2POpaqueNode {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct RegStartNodeRequest {
-    reg_start_req: RegStartRequest,
-    index: i32,
-    other_indices: HashSet<i32>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct RegStartResponse {
     pub(crate) rwd: RistrettoPoint,
     pub(crate) index: i32,
@@ -97,23 +90,21 @@ pub struct RegStartResponse {
 impl P2POpaqueNode {
     pub fn peer_registration_start(
         &mut self,
-        peer_req: RegStartNodeRequest,
+        peer_req: RegStartRequest,
+        index: i32,
+        other_indices: HashSet<i32>,
     ) -> Result<RegStartResponse, P2POpaqueError> {
         let opaque_keypair = Keypair::new();
-        self.peer_opaque_keys.insert(
-            peer_req.reg_start_req.peer_id.clone(),
-            opaque_keypair.clone(),
-        );
+        self.peer_opaque_keys
+            .insert(peer_req.peer_id.clone(), opaque_keypair.clone());
         if self
             .peer_attempted_public_keys
-            .contains_key(&peer_req.reg_start_req.peer_id)
+            .contains_key(&peer_req.peer_id)
         {
             return Err(P2POpaqueError::RegistrationError);
         }
-        self.peer_attempted_public_keys.insert(
-            peer_req.reg_start_req.peer_id,
-            peer_req.reg_start_req.peer_public_key,
-        );
+        self.peer_attempted_public_keys
+            .insert(peer_req.peer_id, peer_req.peer_public_key);
         let private_key = Scalar::from_canonical_bytes(opaque_keypair.private_key).into_option();
         if let None = private_key {
             return Err(P2POpaqueError::CryptoError(
@@ -121,18 +112,17 @@ impl P2POpaqueNode {
             ));
         }
         let password_blind_eval = OPRFServer::blind_evaluate(
-            peer_req.reg_start_req.blinded_pwd,
+            peer_req.blinded_pwd,
             private_key.unwrap(),
-            i32_to_scalar(peer_req.index),
-            peer_req
-                .other_indices
+            i32_to_scalar(index),
+            other_indices
                 .iter()
                 .map(|i| i32_to_scalar(i.clone()))
                 .collect(),
         );
         Ok(RegStartResponse {
             rwd: password_blind_eval,
-            index: peer_req.index,
+            index,
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
         })
@@ -291,13 +281,6 @@ impl P2POpaqueNode {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct LoginStartNodeRequest {
-    login_start_req: LoginStartRequest,
-    index: i32,
-    other_indices: HashSet<i32>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct LoginStartResponse {
     pub(crate) rwd: RistrettoPoint,
     pub(crate) index: i32,
@@ -309,31 +292,32 @@ pub struct LoginStartResponse {
 impl P2POpaqueNode {
     pub fn peer_login_start(
         &self,
-        peer_req: LoginStartNodeRequest,
+        peer_req: LoginStartRequest,
+        index: i32,
+        other_indices: HashSet<i32>,
     ) -> Result<LoginStartResponse, P2POpaqueError> {
-        let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.login_start_req.peer_id);
+        let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.peer_id);
         if let None = local_opaque_keypair {
             return Err(P2POpaqueError::RegistrationError);
         }
-        let envelope = self.envelopes.get(&peer_req.login_start_req.peer_id);
+        let envelope = self.envelopes.get(&peer_req.peer_id);
         if let None = envelope {
             return Err(P2POpaqueError::RegistrationError);
         }
         let private_key =
             Scalar::from_canonical_bytes(local_opaque_keypair.unwrap().private_key).into_option();
         let password_blind_eval = OPRFServer::blind_evaluate(
-            peer_req.login_start_req.blinded_pwd,
+            peer_req.blinded_pwd,
             private_key.unwrap(),
-            i32_to_scalar(peer_req.index),
-            peer_req
-                .other_indices
+            i32_to_scalar(index),
+            other_indices
                 .iter()
                 .map(|i| i32_to_scalar(i.clone()))
                 .collect(),
         );
         Ok(LoginStartResponse {
             rwd: password_blind_eval,
-            index: peer_req.index,
+            index,
             envelope: envelope.unwrap().clone(),
             peer_public_key: self.keypair.public_key,
             peer_id: self.id.clone(),
