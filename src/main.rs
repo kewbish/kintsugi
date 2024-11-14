@@ -113,6 +113,7 @@ enum BroadcastMessage {
     IdIndexMessage(IdIndexMessage),
     OPRFRegInitMessage(OPRFRegInitMessage),
     OPRFRegStartRespMessage(OPRFRegStartRespMessage),
+    OPRFRegFinishReqMessage(OPRFRegFinishReqMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -282,6 +283,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::OPRFRegStartRespMessage(msg) => {
                 handle_message_reg_start_resp(&mut state, swarm, peer_id, threshold, msg)
+            }
+            BroadcastMessage::OPRFRegFinishReqMessage(msg) => {
+                handle_message_reg_finish_req(&mut state, swarm, peer_id, msg)
             }
         }
     }
@@ -456,6 +460,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         state.registration_received = Some(s);
+
+        Ok(())
+    }
+
+    fn handle_message_reg_finish_req(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        message: OPRFRegFinishReqMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        state
+            .opaque_node
+            .peer_registration_finish(message.reg_finish_req)?;
+
+        println!(
+            "[REG FINISH] Finished peer registration for {}",
+            message.user_id
+        );
 
         Ok(())
     }
@@ -784,200 +806,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(notepad.unwrap().to_string())
     }
 
-    #[tauri::command]
-    fn local_login_start(state: State<TauriState>, password: String) -> Result<String, String> {
-        let mut node_state = state.0.lock().unwrap();
-        let result = node_state.opaque_node.local_login_start(password);
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-        let result = result.unwrap();
-        let serialized = serde_json::to_string(&result);
-        if let Err(e) = serialized {
-            return Err(e.to_string());
-        }
-        return Ok(serialized.unwrap());
-    }
-
-    #[tauri::command]
-    fn peer_login_start(state: State<TauriState>, peer_req: String) -> Result<String, String> {
-        /*
-        let login_start_node_req = serde_json::from_str(&peer_req);
-        if let Err(e) = login_start_node_req {
-            return Err(e.to_string());
-        }
-        let login_start_node_req: LoginStartNodeRequest = login_start_node_req.unwrap();
-        let node_state = state.0.lock().unwrap();
-        let result = node_state
-            .opaque_node
-            .peer_login_start(login_start_node_req);
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-        let result = result.unwrap();
-        let serialized = serde_json::to_string(&result);
-        if let Err(e) = serialized {
-            return Err(e.to_string());
-        }
-        return Ok(serialized.unwrap());*/
-        Ok("".to_string())
-    }
-
-    #[tauri::command]
-    fn local_login_finish(state: State<TauriState>, peer_resp: Vec<String>) -> Result<(), String> {
-        let mut result = Vec::new();
-        for peer_resp in peer_resp.iter() {
-            let deserialized_peer_resp = serde_json::from_str(&peer_resp);
-            if let Err(e) = deserialized_peer_resp {
-                return Err(e.to_string());
-            }
-            result.push(deserialized_peer_resp.unwrap());
-        }
-
-        let mut node_state = state.0.lock().unwrap();
-        let result = node_state
-            .opaque_node
-            .local_login_finish(node_state.libp2p_keypair_bytes.clone(), result);
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-        let result = result.unwrap();
-
-        node_state.opaque_keypair = result.0.clone();
-        let libp2p_keypair =
-            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut result.1.clone());
-        if let Err(e) = libp2p_keypair {
-            return Err(e.to_string());
-        }
-
-        let peer_id = PeerId::from_public_key(
-            &libp2p::identity::Keypair::from(libp2p_keypair.unwrap()).public(),
-        );
-
-        update_with_peer_id(
-            &mut node_state,
-            result.0,
-            result.1,
-            state.1.clone(),
-            peer_id,
-        )?;
-
-        Ok(())
-    }
-
-    #[tauri::command]
-    fn local_registration_start(
-        state: State<TauriState>,
-        password: String,
-    ) -> Result<String, String> {
-        let mut node_state = state.0.lock().unwrap();
-        let result = node_state.opaque_node.local_registration_start(password);
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-        let result = result.unwrap();
-        let serialized = serde_json::to_string(&result);
-        if let Err(e) = serialized {
-            return Err(e.to_string());
-        }
-        return Ok(serialized.unwrap());
-    }
-
-    #[tauri::command]
-    fn peer_registration_start(
-        state: State<TauriState>,
-        peer_req: String,
-    ) -> Result<String, String> {
-        /*
-        let reg_start_node_req = serde_json::from_str(&peer_req);
-        if let Err(e) = reg_start_node_req {
-            return Err(e.to_string());
-        }
-        let reg_start_node_req: RegStartNodeRequest = reg_start_node_req.unwrap();
-        let mut node_state = state.0.lock().unwrap();
-        let result = node_state
-            .opaque_node
-            .peer_registration_start(reg_start_node_req);
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-        let result = result.unwrap();
-        let serialized = serde_json::to_string(&result);
-        if let Err(e) = serialized {
-            return Err(e.to_string());
-        }
-        return Ok(serialized.unwrap());*/
-        Ok("".to_string())
-    }
-
-    #[tauri::command]
-    fn local_registration_finish(
-        state: State<TauriState>,
-        peer_resp: String,
-    ) -> Result<String, String> {
-        let deserialized_peer_resp = serde_json::from_str(&peer_resp);
-        if let Err(e) = deserialized_peer_resp {
-            return Err(e.to_string());
-        }
-
-        let mut node_state = state.0.lock().unwrap();
-        let libp2p_keypair_bytes = node_state.libp2p_keypair_bytes.clone();
-        let result = node_state
-            .opaque_node
-            .local_registration_finish(libp2p_keypair_bytes, deserialized_peer_resp.unwrap());
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-        let result = result.unwrap();
-        let serialized = serde_json::to_string(&result);
-        if let Err(e) = serialized {
-            return Err(e.to_string());
-        }
-        return Ok(serialized.unwrap());
-    }
-
-    #[tauri::command]
-    fn peer_registration_finish(
-        state: State<TauriState>,
-        peer_req: String,
-    ) -> Result<String, String> {
-        let reg_finish_req = serde_json::from_str(&peer_req);
-        if let Err(e) = reg_finish_req {
-            return Err(e.to_string());
-        }
-        let reg_finish_req: RegFinishRequest = reg_finish_req.unwrap();
-        let mut node_state = state.0.lock().unwrap();
-        let result = node_state
-            .opaque_node
-            .peer_registration_finish(reg_finish_req);
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-
-        let node_state = state.0.lock().unwrap();
-        let serialized_envelopes = serde_json::to_string(&node_state.opaque_node.envelopes);
-        if let Err(e) = serialized_envelopes {
-            return Err(e.to_string());
-        }
-        let file_path = "tmp/envelopes.list".to_string();
-        let file = fs::File::create(file_path);
-        if let Err(e) = file {
-            return Err(e.to_string());
-        }
-        let mut file = file.unwrap();
-        let file_result = file.write_all(serialized_envelopes.unwrap().as_bytes());
-        if let Err(e) = file_result {
-            return Err(e.to_string());
-        }
-
-        let result = result.unwrap();
-        let serialized = serde_json::to_string(&result);
-        if let Err(e) = serialized {
-            return Err(e.to_string());
-        }
-        return Ok(serialized.unwrap());
-    }
-
     fn tauri_broadcast_message(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
@@ -1021,13 +849,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             local_login,
             read_notepad,
             save_notepad,
-            local_login_start,
-            peer_login_start,
-            local_login_finish,
-            local_registration_start,
-            peer_registration_start,
-            local_registration_finish,
-            peer_registration_finish,
             get_peers,
             add_peer_tauri,
             remove_peer_tauri,
