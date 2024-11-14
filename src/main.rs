@@ -27,8 +27,8 @@ use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
 use local_envelope::{LocalEncryptedEnvelope, LocalEnvelope};
 use opaque::{
-    EncryptedEnvelope, Envelope, P2POpaqueError, P2POpaqueNode, RegFinishRequest, RegStartRequest,
-    RegStartResponse,
+    EncryptedEnvelope, Envelope, LoginStartRequest, LoginStartResponse, P2POpaqueError,
+    P2POpaqueNode, RegFinishRequest, RegStartRequest, RegStartResponse,
 };
 use oprf::{OPRFClient, OPRFServer};
 use polynomial::Polynomial;
@@ -63,12 +63,14 @@ struct NodeState {
     broadcast_topic: IdentTopic,            // for broadcasting
     broadcast_topics: HashMap<PeerId, IdentTopic>, // subscribe to these two
     point_to_point_topics: HashMap<PeerId, IdentTopic>,
+    tx: tokio::sync::mpsc::Sender<TauriToRustCommand>,
     acss_inputs: ACSSInputs,
     opaque_node: P2POpaqueNode,
     peer_recoveries: HashMap<PeerId, (ACSSNodeShare, i32)>, // the indices for nodes for which this node
     // is a recovery node
     phi_polynomials: Option<(Polynomial, Polynomial)>,
     registration_received: Option<HashMap<PeerId, RegStartResponse>>,
+    recovery_received: Option<HashMap<PeerId, LoginStartResponse>>,
 }
 
 // --- message structs --- //
@@ -108,12 +110,33 @@ struct OPRFRegFinishReqMessage {
     node_id: PeerId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct OPRFRecoveryStartReqMessage {
+    recovery_start_req: LoginStartRequest,
+    other_indices: HashSet<i32>,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct OPRFRecoveryStartRespMessage {
+    recovery_start_resp: LoginStartResponse,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
+}
+
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     IdIndexMessage(IdIndexMessage),
     OPRFRegInitMessage(OPRFRegInitMessage),
     OPRFRegStartRespMessage(OPRFRegStartRespMessage),
     OPRFRegFinishReqMessage(OPRFRegFinishReqMessage),
+    OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage),
+    OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -214,6 +237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
     let state = NodeState {
         peer_id: PeerId::random(),        // temp
         known_peer_ids: HashSet::new(),   // temp
@@ -224,6 +248,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         broadcast_topic: IdentTopic::new("temp"),
         broadcast_topics: HashMap::new(),
         point_to_point_topics: HashMap::new(),
+        tx: tx.clone(),
         acss_inputs: ACSSInputs {
             h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
             degree: 1,
@@ -233,9 +258,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_recoveries: HashMap::new(),
         phi_polynomials: None,
         registration_received: None,
+        recovery_received: None,
     };
     let state_arc = Arc::new(Mutex::new(state));
-    let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
 
     let max_malicious = 1;
     let threshold = 3;
@@ -286,6 +311,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::OPRFRegFinishReqMessage(msg) => {
                 handle_message_reg_finish_req(&mut state, swarm, peer_id, msg)
+            }
+            BroadcastMessage::OPRFRecoveryStartReqMessage(msg) => {
+                handle_message_rec_start_req(&mut state, swarm, peer_id, msg)
+            }
+            BroadcastMessage::OPRFRecoveryStartRespMessage(msg) => {
+                handle_message_rec_start_resp(&mut state, swarm, peer_id, threshold, msg)
             }
         }
     }
@@ -384,7 +415,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect();
         let reg_start_resp = state.opaque_node.peer_registration_start(
             message.reg_start_req,
-            message.user_index,
+            message.node_index,
             other_indices,
         )?;
         let reg_start_resp_message = serde_json::to_vec(&OPRFRegStartRespMessage {
@@ -459,8 +490,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        state.registration_received = Some(s);
-
         Ok(())
     }
 
@@ -478,6 +507,123 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "[REG FINISH] Finished peer registration for {}",
             message.user_id
         );
+
+        Ok(())
+    }
+
+    fn handle_recovery_init(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        password: String,
+        recovery_addresses: HashMap<PeerId, i32>,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        state.recovery_received = Some(HashMap::new());
+
+        let recovery_start_req = state.opaque_node.local_login_start(password)?;
+
+        let other_indices: HashSet<i32> = recovery_addresses
+            .clone()
+            .values()
+            .map(|v| v.clone())
+            .collect();
+        for (address, index) in recovery_addresses.iter() {
+            let topic = state.point_to_point_topics.get(&address).unwrap().clone();
+            let login_start_req = serde_json::to_vec(&OPRFRecoveryStartReqMessage {
+                recovery_start_req: recovery_start_req.clone(),
+                other_indices: other_indices.clone(),
+                user_index: state.index,
+                user_id: state.peer_id,
+                node_index: index.clone(),
+                node_id: address.clone(),
+            })
+            .unwrap();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), login_start_req);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!("[REC INIT] Sending initial req for index {}", state.index);
+            }
+        }
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_rec_start_req(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        message: OPRFRecoveryStartReqMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let rec_start_resp = state.opaque_node.peer_login_start(
+            message.recovery_start_req,
+            message.node_index,
+            message.other_indices,
+        )?;
+        let rec_start_resp_message = serde_json::to_vec(&OPRFRecoveryStartRespMessage {
+            recovery_start_resp: rec_start_resp,
+            user_index: message.user_index,
+            user_id: message.user_id,
+            node_index: state.index,
+            node_id: state.peer_id,
+        })
+        .unwrap();
+        let topic = state
+            .point_to_point_topics
+            .get(&message.user_id)
+            .unwrap()
+            .clone();
+        if let Err(e) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), rec_start_resp_message)
+        {
+            println!("Publish error: {e:?}");
+        } else {
+            println!("[REC INIT] Published acknowledgement message");
+        }
+
+        Ok(())
+    }
+
+    fn handle_message_rec_start_resp(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        threshold: usize,
+        message: OPRFRecoveryStartRespMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        if let None = state.recovery_received {
+            return Ok(());
+        }
+
+        let mut s = state.recovery_received.take().unwrap();
+        s.insert(peer_id, message.recovery_start_resp);
+
+        if s.len() < threshold {
+            return Ok(());
+        }
+
+        let (opaque_keypair, libp2p_keypair_bytes) = state.opaque_node.local_login_finish(
+            state.libp2p_keypair_bytes,
+            s.values().map(|v| v.clone()).collect(),
+        )?;
+        state.opaque_keypair = opaque_keypair.clone();
+        state.libp2p_keypair_bytes = libp2p_keypair_bytes;
+
+        let libp2p_keypair =
+            libp2p::identity::ed25519::Keypair::try_from_bytes(&mut libp2p_keypair_bytes.clone())?;
+        let new_peer_id =
+            PeerId::from_public_key(&(libp2p::identity::PublicKey::from(libp2p_keypair.public())));
+        update_with_peer_id(
+            state,
+            opaque_keypair,
+            libp2p_keypair_bytes,
+            state.tx.clone(),
+            new_peer_id,
+        )?;
 
         Ok(())
     }
