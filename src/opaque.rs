@@ -158,20 +158,19 @@ pub struct EncryptedEnvelope {
 impl P2POpaqueNode {
     pub fn local_registration_finish(
         &mut self,
-        password: String,
         libp2p_keypair_bytes: [u8; 64],
-        peer_resp: Vec<RegStartResponse>,
+        peer_resps: Vec<RegStartResponse>,
     ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
                 "OPRF client not initialized".to_string(),
             ));
         }
-        let all_indices: HashSet<Scalar> = peer_resp
+        let all_indices: HashSet<Scalar> = peer_resps
             .iter()
             .map(|resp| i32_to_scalar(resp.index.clone()))
             .collect();
-        let combined_rwd = peer_resp
+        let combined_rwd = peer_resps
             .iter()
             .map(|resp| {
                 get_lagrange_coefficient(i32_to_scalar(resp.index.clone()), all_indices.clone())
@@ -194,7 +193,7 @@ impl P2POpaqueNode {
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let mut result = Vec::new();
-        for peer_resp in peer_resp.iter() {
+        for peer_resp in peer_resps.iter() {
             let envelope = Envelope {
                 keypair: self.keypair.clone(),
                 libp2p_keypair_bytes,
@@ -328,20 +327,19 @@ impl P2POpaqueNode {
 impl P2POpaqueNode {
     pub fn local_login_finish(
         &self,
-        password: String,
         libp2p_keypair_bytes: [u8; 64],
-        peer_resp: Vec<LoginStartResponse>,
+        peer_resps: Vec<LoginStartResponse>,
     ) -> Result<(Keypair, [u8; 64]), P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
                 "OPRF client not initialized".to_string(),
             ));
         }
-        let all_indices: HashSet<Scalar> = peer_resp
+        let all_indices: HashSet<Scalar> = peer_resps
             .iter()
             .map(|resp| i32_to_scalar(resp.index.clone()))
             .collect();
-        let combined_rwd = peer_resp
+        let combined_rwd = peer_resps
             .iter()
             .map(|resp| {
                 get_lagrange_coefficient(i32_to_scalar(resp.index.clone()), all_indices.clone())
@@ -360,10 +358,10 @@ impl P2POpaqueNode {
         hasher.update(unblinded_rwd.compress().to_bytes());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let nonce_bytes = peer_resp[0].envelope.nonce;
+        let nonce_bytes = peer_resps[0].envelope.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext_bytes =
-            cipher.decrypt(nonce, peer_resp[0].envelope.encrypted_envelope.as_ref());
+            cipher.decrypt(nonce, peer_resps[0].envelope.encrypted_envelope.as_ref());
         if let Err(e) = plaintext_bytes {
             return Err(P2POpaqueError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),

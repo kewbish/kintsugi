@@ -68,6 +68,7 @@ struct NodeState {
     peer_recoveries: HashMap<PeerId, (ACSSNodeShare, i32)>, // the indices for nodes for which this node
     // is a recovery node
     phi_polynomials: Option<(Polynomial, Polynomial)>,
+    registration_received: Option<HashMap<PeerId, RegStartResponse>>,
 }
 
 // --- message structs --- //
@@ -98,10 +99,20 @@ struct OPRFRegStartRespMessage {
     node_id: PeerId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct OPRFRegFinishReqMessage {
+    reg_finish_req: RegFinishRequest,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
+}
+
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     IdIndexMessage(IdIndexMessage),
     OPRFRegInitMessage(OPRFRegInitMessage),
+    OPRFRegStartRespMessage(OPRFRegStartRespMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -220,6 +231,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         opaque_node: P2POpaqueNode::new("".to_string()),
         peer_recoveries: HashMap::new(),
         phi_polynomials: None,
+        registration_received: None,
     };
     let state_arc = Arc::new(Mutex::new(state));
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
@@ -228,7 +240,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let threshold = 3;
 
     let mut swarm = new_swarm(libp2p::identity::ed25519::Keypair::generate())?;
-    let mut stdin = io::BufReader::new(io::stdin()).lines();
 
     // the bootstrap nodes aren't listening on this topic, need to run own nodes
     /*let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
@@ -269,6 +280,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             BroadcastMessage::OPRFRegInitMessage(msg) => {
                 handle_message_reg_init(&mut state, swarm, peer_id, msg)
             }
+            BroadcastMessage::OPRFRegStartRespMessage(msg) => {
+                handle_message_reg_start_resp(&mut state, swarm, peer_id, threshold, msg)
+            }
         }
     }
 
@@ -276,8 +290,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         password: String,
-        node_index: i32,
-        node_id: PeerId,
+        recovery_addresses: HashMap<PeerId, i32>,
     ) -> Result<NodeState, Box<dyn Error>> {
         for peer_id in state.known_peer_ids.iter() {
             let topic = state.point_to_point_topics.get(&peer_id).unwrap();
@@ -301,31 +314,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
             state.opaque_keypair.private_key,
         )?;
         state.phi_polynomials = Some((phi, phi_hat));
+        state.registration_received = Some(HashMap::new());
 
         let reg_start_req = state.opaque_node.local_registration_start(password)?;
 
-        let init_message = serde_json::to_vec(&OPRFRegInitMessage {
-            inputs: state.acss_inputs.clone(),
-            reg_start_req,
-            dealer_shares: acss_dealer_share
-                .iter()
-                .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
-                .collect(),
-            dealer_key: state.opaque_keypair.public_key,
-            user_index: state.index,
-            user_id: state.peer_id,
-            node_index,
-            node_id,
-        })
-        .unwrap();
-        let message_id = swarm
-            .behaviour_mut()
-            .gossipsub
-            .publish(state.broadcast_topic.clone(), init_message);
-        if let Err(e) = message_id {
-            println!("Publish error: {e:?}");
-        } else {
-            println!("[INIT] Sending ACSS share messages for index {node_index}");
+        for (address, index) in recovery_addresses.iter() {
+            let topic = state.point_to_point_topics.get(&address).unwrap().clone();
+            let init_message = serde_json::to_vec(&OPRFRegInitMessage {
+                inputs: state.acss_inputs.clone(),
+                reg_start_req: reg_start_req.clone(),
+                dealer_shares: acss_dealer_share
+                    .iter()
+                    .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
+                    .collect(),
+                dealer_key: state.opaque_keypair.public_key,
+                user_index: state.index,
+                user_id: state.peer_id,
+                node_index: index.clone(),
+                node_id: address.clone(),
+            })
+            .unwrap();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), init_message);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!(
+                    "[INIT] Sending ACSS share messages for index {}",
+                    state.index
+                );
+            }
         }
 
         Ok(state.clone())
@@ -365,8 +385,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         let reg_start_resp_message = serde_json::to_vec(&OPRFRegStartRespMessage {
             reg_start_resp,
-            user_index: message.node_index,
-            user_id: message.node_id,
+            user_index: message.user_index,
+            user_id: message.user_id,
             node_index: state.index,
             node_id: state.peer_id,
         })
@@ -380,6 +400,62 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("[REG INIT] Published acknowledgement message");
         }
+
+        Ok(())
+    }
+
+    fn handle_message_reg_start_resp(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        threshold: usize,
+        message: OPRFRegStartRespMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        if let None = state.registration_received {
+            return Ok(());
+        }
+
+        let mut s = state.registration_received.take().unwrap();
+        s.insert(peer_id, message.reg_start_resp);
+
+        if s.len() < threshold {
+            return Ok(());
+        }
+
+        let reg_finish_reqs = state.opaque_node.local_registration_finish(
+            state.libp2p_keypair_bytes,
+            s.values().map(|v| v.clone()).collect(),
+        )?;
+        for reg_finish_req in reg_finish_reqs.iter() {
+            let index = state.peer_id_to_index.get(&peer_id).unwrap().clone();
+            let reg_finish_req_message = serde_json::to_vec(&OPRFRegFinishReqMessage {
+                reg_finish_req: reg_finish_req.clone(),
+                user_index: state.index,
+                user_id: state.peer_id,
+                node_index: index,
+                node_id: peer_id,
+            })
+            .unwrap();
+            let topic = state
+                .point_to_point_topics
+                .get(&PeerId::from_str(&reg_finish_req.peer_id).unwrap())
+                .unwrap()
+                .clone();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), reg_finish_req_message);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!(
+                    "[REG START RESP] Sending reg start finish messages {}",
+                    state.index
+                );
+            }
+        }
+
+        state.registration_received = Some(s);
 
         Ok(())
     }
@@ -748,11 +824,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     #[tauri::command]
-    fn local_login_finish(
-        state: State<TauriState>,
-        password: String,
-        peer_resp: Vec<String>,
-    ) -> Result<(), String> {
+    fn local_login_finish(state: State<TauriState>, peer_resp: Vec<String>) -> Result<(), String> {
         let mut result = Vec::new();
         for peer_resp in peer_resp.iter() {
             let deserialized_peer_resp = serde_json::from_str(&peer_resp);
@@ -763,11 +835,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let mut node_state = state.0.lock().unwrap();
-        let result = node_state.opaque_node.local_login_finish(
-            password,
-            node_state.libp2p_keypair_bytes.clone(),
-            result,
-        );
+        let result = node_state
+            .opaque_node
+            .local_login_finish(node_state.libp2p_keypair_bytes.clone(), result);
         if let Err(e) = result {
             return Err(e.to_string());
         }
@@ -843,7 +913,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[tauri::command]
     fn local_registration_finish(
         state: State<TauriState>,
-        password: String,
         peer_resp: String,
     ) -> Result<String, String> {
         let deserialized_peer_resp = serde_json::from_str(&peer_resp);
@@ -853,11 +922,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let mut node_state = state.0.lock().unwrap();
         let libp2p_keypair_bytes = node_state.libp2p_keypair_bytes.clone();
-        let result = node_state.opaque_node.local_registration_finish(
-            password,
-            libp2p_keypair_bytes,
-            deserialized_peer_resp.unwrap(),
-        );
+        let result = node_state
+            .opaque_node
+            .local_registration_finish(libp2p_keypair_bytes, deserialized_peer_resp.unwrap());
         if let Err(e) = result {
             return Err(e.to_string());
         }
