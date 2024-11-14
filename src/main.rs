@@ -18,6 +18,7 @@ use chacha20poly1305::{
 };
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::{RistrettoPoint, Scalar};
+use dpss::DPSS;
 use futures::prelude::*;
 use itertools::Itertools;
 use keypair::{Keypair, PublicKey};
@@ -71,6 +72,7 @@ struct NodeState {
     phi_polynomials: Option<(Polynomial, Polynomial)>,
     registration_received: Option<HashMap<PeerId, RegStartResponse>>,
     recovery_received: Option<HashMap<PeerId, LoginStartResponse>>,
+    reshare_received: Option<HashMap<PeerId, (ACSSNodeShare, ACSSNodeShare)>>,
 }
 
 // --- message structs --- //
@@ -129,6 +131,28 @@ struct OPRFRecoveryStartRespMessage {
     node_id: PeerId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct DPSSRefreshInitMessage {
+    new_recovery_addresses: HashMap<PeerId, i32>,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DPSSRefreshReshareMessage {
+    inputs: ACSSInputs,
+    dealer_shares: HashMap<PeerId, ACSSDealerShare>,
+    dealer_shares_hat: HashMap<PeerId, ACSSDealerShare>,
+    commitments: HashMap<Scalar, RistrettoPoint>,
+    dealer_key: PublicKey,
+    user_index: i32,
+    user_id: PeerId,
+    node_index: i32,
+    node_id: PeerId,
+}
+
 #[derive(Serialize, Deserialize)]
 enum BroadcastMessage {
     IdIndexMessage(IdIndexMessage),
@@ -137,6 +161,8 @@ enum BroadcastMessage {
     OPRFRegFinishReqMessage(OPRFRegFinishReqMessage),
     OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage),
     OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage),
+    DPSSRefreshInitMessage(DPSSRefreshInitMessage),
+    DPSSRefreshReshareMessage(DPSSRefreshReshareMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -259,6 +285,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         phi_polynomials: None,
         registration_received: None,
         recovery_received: None,
+        reshare_received: None,
     };
     let state_arc = Arc::new(Mutex::new(state));
 
@@ -317,6 +344,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             BroadcastMessage::OPRFRecoveryStartRespMessage(msg) => {
                 handle_message_rec_start_resp(&mut state, swarm, peer_id, threshold, msg)
+            }
+            BroadcastMessage::DPSSRefreshInitMessage(msg) => {
+                handle_message_dpss_init(&mut state, swarm, peer_id, msg)
+            }
+            BroadcastMessage::DPSSRefreshReshareMessage(msg) => {
+                handle_message_dpss_reshare(&mut state, swarm, peer_id, threshold, msg)
             }
         }
     }
@@ -454,6 +487,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         s.insert(peer_id, message.reg_start_resp);
 
         if s.len() < threshold {
+            state.registration_received = Some(s);
             return Ok(());
         }
 
@@ -603,6 +637,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         s.insert(peer_id, message.recovery_start_resp);
 
         if s.len() < threshold {
+            state.recovery_received = Some(s);
             return Ok(());
         }
 
@@ -624,6 +659,171 @@ async fn main() -> Result<(), Box<dyn Error>> {
             state.tx.clone(),
             new_peer_id,
         )?;
+
+        Ok(())
+    }
+
+    fn handle_refresh_init(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        old_recovery_addresses: HashMap<PeerId, i32>,
+        new_recovery_addresses: HashMap<PeerId, i32>,
+    ) -> Result<NodeState, Box<dyn Error>> {
+        for (address, index) in old_recovery_addresses.iter() {
+            let topic = state.point_to_point_topics.get(&address).unwrap();
+            let init_message = serde_json::to_vec(&DPSSRefreshInitMessage {
+                new_recovery_addresses: new_recovery_addresses.clone(),
+                user_index: state.index,
+                user_id: state.peer_id,
+                node_index: index.clone(),
+                node_id: address.clone(),
+            })
+            .unwrap();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), init_message);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!("[DPSS INIT] Sending init message");
+            }
+        }
+
+        Ok(state.clone())
+    }
+
+    fn handle_message_dpss_init(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        message: DPSSRefreshInitMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let (node_share, index) = state.peer_recoveries.get(&peer_id).unwrap();
+        let (acss_dealer_share_s, _, _) = ACSS::share_dealer(
+            state.acss_inputs.clone(),
+            node_share.s_i_d,
+            message.new_recovery_addresses.len() - 1,
+            state.opaque_keypair.private_key,
+        )?;
+
+        let (acss_dealer_share_s_hat, _, _) = ACSS::share_dealer(
+            state.acss_inputs.clone(),
+            node_share.s_hat_i_d,
+            message.new_recovery_addresses.len() - 1,
+            state.opaque_keypair.private_key,
+        )?;
+
+        let old_commitments: HashMap<Scalar, RistrettoPoint> = state
+            .peer_recoveries
+            .iter()
+            .map(|(_, v)| (i32_to_scalar(v.1), v.0.c_i.clone()))
+            .collect();
+
+        for (address, index) in message.new_recovery_addresses.iter() {
+            let topic = state.point_to_point_topics.get(&address).unwrap().clone();
+            let reshare_msg = serde_json::to_vec(&DPSSRefreshReshareMessage {
+                inputs: state.acss_inputs.clone(),
+                dealer_shares: acss_dealer_share_s
+                    .iter()
+                    .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
+                    .collect(),
+                dealer_shares_hat: acss_dealer_share_s_hat
+                    .iter()
+                    .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
+                    .collect(),
+                dealer_key: state.opaque_keypair.private_key,
+                commitments: old_commitments.clone(),
+                user_index: state.index,
+                user_id: state.peer_id,
+                node_index: index.clone(),
+                node_id: address.clone(),
+            })
+            .unwrap();
+            let message_id = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic.clone(), reshare_msg);
+            if let Err(e) = message_id {
+                println!("Publish error: {e:?}");
+            } else {
+                println!(
+                    "[DPSS INIT] Sending initial ACSS reshares for index {}",
+                    state.index
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_message_dpss_reshare(
+        state: &mut NodeState,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        threshold: usize,
+        message: DPSSRefreshReshareMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let node_share = ACSS::share(
+            message.inputs.clone(),
+            message.dealer_shares.get(&state.peer_id).unwrap().clone(),
+            state.opaque_keypair.clone(),
+            message.dealer_key,
+        )?;
+        let node_share_hat = ACSS::share(
+            message.inputs.clone(),
+            message
+                .dealer_shares_hat
+                .get(&state.peer_id)
+                .unwrap()
+                .clone(),
+            state.opaque_keypair.clone(),
+            message.dealer_key,
+        )?;
+
+        let mut s: HashMap<PeerId, (ACSSNodeShare, ACSSNodeShare)>;
+        if let None = state.reshare_received {
+            s = HashMap::new();
+        } else {
+            s = state.reshare_received.take().unwrap();
+        }
+
+        s.insert(peer_id, (node_share, node_share_hat));
+
+        if s.len() < threshold {
+            state.reshare_received = Some(s);
+            return Ok(());
+        }
+
+        let evaluations: HashMap<Scalar, Scalar> = s
+            .iter()
+            .map(|(_, v)| (i32_to_scalar(message.node_index), v.0.s_i_d))
+            .collect();
+        let evaluations_hat: HashMap<Scalar, Scalar> = s
+            .iter()
+            .map(|(_, v)| (i32_to_scalar(message.node_index), v.1.s_i_d))
+            .collect();
+        let (s_i_d_prime, s_hat_i_d_prime, new_commitments) = DPSS::reshare_w_evals(
+            evaluations,
+            evaluations_hat,
+            message.commitments,
+            state.acss_inputs.h_point,
+        )?;
+        let commitment_i = new_commitments
+            .get(&i32_to_scalar(message.node_index))
+            .unwrap();
+
+        state.peer_recoveries.insert(
+            peer_id,
+            (
+                ACSSNodeShare {
+                    s_i_d: s_i_d_prime,
+                    s_hat_i_d: s_hat_i_d_prime,
+                    c_i: commitment_i.clone(),
+                },
+                message.node_index,
+            ),
+        );
 
         Ok(())
     }

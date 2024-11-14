@@ -7,7 +7,7 @@ use crate::{
     polynomial::{get_lagrange_coefficient_w_target, BivariatePolynomial, Polynomial},
 };
 
-struct DPSS {}
+pub struct DPSS {}
 
 impl DPSS {
     fn reshare_old(
@@ -63,6 +63,40 @@ impl DPSS {
             s_hat_i_d_prime,
             s_i_d_prime * RISTRETTO_BASEPOINT_POINT + s_hat_i_d_prime * h_point,
         ))*/
+        Ok((s_i_d_prime, s_hat_i_d_prime, new_commitments))
+    }
+
+    pub fn reshare_w_evals(
+        evaluations: HashMap<Scalar, Scalar>,
+        evaluations_hats: HashMap<Scalar, Scalar>,
+        commitments: HashMap<Scalar, RistrettoPoint>,
+        h_point: RistrettoPoint,
+    ) -> Result<(Scalar, Scalar, HashMap<Scalar, RistrettoPoint>), P2POpaqueError> {
+        let evals_keys: HashSet<Scalar> = evaluations.keys().copied().collect();
+        let evals_hats_keys: HashSet<Scalar> = evaluations_hats.keys().copied().collect();
+        let commitments_keys: HashSet<Scalar> = commitments.keys().copied().collect();
+        if !(evals_keys == evals_hats_keys && evals_hats_keys == commitments_keys) {
+            return Err(P2POpaqueError::CryptoError(
+                "Missing shares, blinding factors, or commitments for some nodes".to_string(),
+            ));
+        }
+
+        let s_i_d_prime = BivariatePolynomial::interpolate_0(evaluations);
+        let s_hat_i_d_prime = BivariatePolynomial::interpolate_0(evaluations_hats);
+
+        let mut new_commitments = HashMap::new();
+        for (i, _) in commitments.iter() {
+            let mut new_commitment = Scalar::ZERO * RISTRETTO_BASEPOINT_POINT;
+            for (other_index, other_old_commitment) in commitments.iter() {
+                new_commitment += get_lagrange_coefficient_w_target(
+                    i.clone(),
+                    other_index.clone(),
+                    commitments_keys.clone(),
+                ) * other_old_commitment;
+            }
+            new_commitments.insert(i.clone(), new_commitment);
+        }
+
         Ok((s_i_d_prime, s_hat_i_d_prime, new_commitments))
     }
 }

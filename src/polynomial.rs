@@ -88,13 +88,17 @@ impl BivariatePolynomial {
             .map(|(i, poly)| (i.clone(), poly.clone().at_scalar(j)))
             .collect();
 
+        BivariatePolynomial::interpolate_0(b_i_j)
+    }
+
+    pub fn interpolate_0(evaluations: HashMap<Scalar, Scalar>) -> Scalar {
         let mut acc = Scalar::ZERO;
 
-        for (i, i_value) in b_i_j.iter() {
+        for (i, i_value) in evaluations.iter() {
             let mut numerator = Scalar::ONE;
             let mut denominator = Scalar::ONE;
 
-            for (j, _) in b_i_j.iter() {
+            for (j, _) in evaluations.iter() {
                 if i != j {
                     numerator *= j;
                     denominator *= j - i;
