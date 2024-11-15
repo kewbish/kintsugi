@@ -59,9 +59,7 @@ struct NodeState {
     index: i32,
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
-    known_peer_ids: HashSet<PeerId>,
     peer_id_to_index: HashMap<PeerId, i32>, // this node's recovery nodes' indices
-    broadcast_topic: IdentTopic,            // for broadcasting
     broadcast_topics: HashMap<PeerId, IdentTopic>, // subscribe to these two
     point_to_point_topics: HashMap<PeerId, IdentTopic>,
     tx: tokio::sync::mpsc::Sender<TauriToRustCommand>,
@@ -74,6 +72,8 @@ struct NodeState {
     recovery_received: Option<HashMap<PeerId, LoginStartResponse>>,
     reshare_received: Option<HashMap<PeerId, (ACSSNodeShare, ACSSNodeShare)>>,
 }
+
+struct PeerMaps(HashMap<PeerId, i32>, HashMap<PeerId, (ACSSNodeShare, i32)>);
 
 // --- message structs --- //
 
@@ -177,7 +177,6 @@ enum TauriToRustCommand {
     NewSwarm(libp2p::identity::ed25519::Keypair),
     AddPeer(String),
     RemovePeer(String),
-    BroadcastMessage(BroadcastMessage),
     SendMessageToPeer(BroadcastMessage, PeerId),
 }
 
@@ -266,12 +265,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
     let state = NodeState {
         peer_id: PeerId::random(),        // temp
-        known_peer_ids: HashSet::new(),   // temp
         peer_id_to_index: HashMap::new(), // temp
         index: 0,
         opaque_keypair: Keypair::new(),
         libp2p_keypair_bytes: [0u8; 64],
-        broadcast_topic: IdentTopic::new("temp"),
         broadcast_topics: HashMap::new(),
         point_to_point_topics: HashMap::new(),
         tx: tx.clone(),
@@ -354,26 +351,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    fn handle_init(
+    fn handle_reg_init(
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         password: String,
         recovery_addresses: HashMap<PeerId, i32>,
     ) -> Result<NodeState, Box<dyn Error>> {
-        for peer_id in state.known_peer_ids.iter() {
-            let topic = state.point_to_point_topics.get(&peer_id).unwrap();
-            let index_message = serde_json::to_vec(&IdIndexMessage { index: state.index }).unwrap();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), index_message);
-            if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
-            } else {
-                println!("[INIT] Sending peer ID/index setup message");
-            }
-        }
-
         let s = Scalar::random(&mut OsRng);
         let (acss_dealer_share, phi, phi_hat) = ACSS::share_dealer(
             state.acss_inputs.clone(),
@@ -387,6 +370,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let reg_start_req = state.opaque_node.local_registration_start(password)?;
 
         for (address, index) in recovery_addresses.iter() {
+            state
+                .peer_id_to_index
+                .insert(address.clone(), index.clone());
             let topic = state.point_to_point_topics.get(&address).unwrap().clone();
             let init_message = serde_json::to_vec(&OPRFRegInitMessage {
                 inputs: state.acss_inputs.clone(),
@@ -690,6 +676,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        state.peer_id_to_index = new_recovery_addresses;
+
         Ok(state.clone())
     }
 
@@ -752,6 +740,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     state.index
                 );
             }
+        }
+
+        if !message.new_recovery_addresses.contains_key(&state.peer_id) {
+            state.peer_recoveries.remove(&message.user_id);
         }
 
         Ok(())
@@ -830,7 +822,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     fn update_peer_ids(state_arc: Arc<Mutex<NodeState>>) -> Result<(), Box<dyn Error>> {
         let state = state_arc.lock().unwrap();
-        let serialized_peers = serde_json::to_string(&state.known_peer_ids)?;
+        let serialized_peers = serde_json::to_string(&(
+            state.peer_id_to_index.clone(),
+            state.peer_recoveries.clone(),
+        ))?;
         let file_path = "tmp/peers.list".to_string();
         let mut file = fs::File::create(file_path)?;
         file.write_all(serialized_peers.as_bytes())?;
@@ -844,7 +839,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
         println!("Routing updated with peer: {:?}", peer);
-        state.known_peer_ids.insert(peer);
         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
         let subscribe_handle = gossipsub::IdentTopic::new(format!("{peer}"));
         state
@@ -900,7 +894,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[tauri::command]
     fn get_peers(state: State<TauriState>) -> Vec<PeerId> {
         let node_state = state.0.lock().unwrap();
-        return Vec::from_iter(node_state.known_peer_ids.clone());
+        return Vec::from_iter(node_state.peer_id_to_index.keys().map(|v| v.clone()));
     }
 
     #[tauri::command]
@@ -985,9 +979,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) -> Result<(), String> {
         node_state.peer_id = peer_id;
         node_state.opaque_node.id = node_state.peer_id.to_string();
-        node_state.known_peer_ids = HashSet::from([node_state.peer_id]);
-        node_state.peer_id_to_index = HashMap::from([(node_state.peer_id, node_state.index)]);
-        node_state.broadcast_topic = IdentTopic::new(format!("{}", node_state.peer_id));
         println!(
             "Peer ID is {} + index is {}",
             node_state.peer_id, node_state.index
@@ -1001,19 +992,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_state.libp2p_keypair_bytes = libp2p_keypair_bytes;
         node_state.opaque_node.keypair = keypair;
 
-        if node_state.known_peer_ids.len() == 0 {
+        if node_state.peer_id_to_index.len() == 0 {
             let file_path = "tmp/peers.list".to_string();
             if Path::new(&file_path).exists() {
                 let contents = std::fs::read_to_string(file_path);
                 if let Err(e) = contents {
                     return Err(e.to_string());
                 }
-                let peers_list: Result<HashSet<PeerId>, _> =
-                    serde_json::from_str(&contents.unwrap());
+                let peers_list: Result<
+                    (HashMap<PeerId, i32>, HashMap<PeerId, (ACSSNodeShare, i32)>),
+                    _,
+                > = serde_json::from_str(&contents.unwrap());
                 if let Err(e) = peers_list {
                     return Err(e.to_string());
                 }
-                node_state.known_peer_ids = peers_list.unwrap();
+                let peers_list = peers_list.unwrap();
+                node_state.peer_id_to_index = peers_list.0;
+                node_state.peer_recoveries = peers_list.1;
             }
         }
 
@@ -1152,23 +1147,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(notepad.unwrap().to_string())
     }
 
-    fn tauri_broadcast_message(
-        state_arc: Arc<Mutex<NodeState>>,
-        swarm: &mut Swarm<P2PBehaviour>,
-        message: BroadcastMessage,
-    ) -> Result<(), Box<dyn Error>> {
-        let serialized_msg = serde_json::to_vec(&message)?;
-        let state = state_arc.lock().unwrap();
-        if let Err(e) = swarm
-            .behaviour_mut()
-            .gossipsub
-            .publish(state.broadcast_topic.clone(), serialized_msg)
-        {
-            return Err(Box::new(e));
-        }
-        Ok(())
-    }
-
     fn tauri_send_message_to_peer(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
@@ -1222,9 +1200,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     remove_peer(state_arc.clone(), &mut swarm, peer_id)?;
                     update_peer_ids(state_arc.clone())?;
                 },
-                TauriToRustCommand::BroadcastMessage(msg) => {
-                    tauri_broadcast_message(state_arc.clone(), &mut swarm, msg)?;
-                }
                 TauriToRustCommand::SendMessageToPeer(msg, peer_id) => {
                     tauri_send_message_to_peer(state_arc.clone(), &mut swarm, msg, peer_id)?;
                 }
@@ -1256,6 +1231,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     message,
                 })) => {
                     handle_message(state_arc.clone(), &mut swarm, max_malicious, threshold, peer_id, id, message)?;
+                    update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
