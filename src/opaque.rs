@@ -15,7 +15,6 @@ use rand::RngCore;
 use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256, Sha3_256Core, Sha3_512};
 use std::collections::{HashMap, HashSet};
-use voprf::{BlindedElement, EvaluationElement, OprfClient, OprfServer};
 
 type CS = voprf::Ristretto255;
 

@@ -19,6 +19,7 @@ pub struct LocalEnvelope {
     pub(crate) libp2p_keypair_bytes: [u8; 64],
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
+    pub(crate) username: String,
 }
 
 impl LocalEnvelope {

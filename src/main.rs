@@ -56,6 +56,7 @@ use util::i32_to_scalar;
 #[derive(Debug, Clone)]
 struct NodeState {
     peer_id: PeerId,
+    username: String,
     index: i32,
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
@@ -266,6 +267,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let state = NodeState {
         peer_id: PeerId::random(),        // temp
         peer_id_to_index: HashMap::new(), // temp
+        username: "".to_string(),         // temp
         index: 0,
         opaque_keypair: Keypair::new(),
         libp2p_keypair_bytes: [0u8; 64],
@@ -922,7 +924,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     #[tauri::command]
-    fn local_register(state: State<TauriState>, password: String) -> Result<(), String> {
+    fn local_register(
+        state: State<TauriState>,
+        username: String,
+        password: String,
+    ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
         let file_path = "tmp/login.envelope".to_string();
         if Path::new(&file_path).exists() {
@@ -944,6 +950,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .compress()
                 .to_bytes(),
             peer_id: node_state.peer_id.to_string(),
+            username,
         };
         let encrypted_envelope = envelope.clone().encrypt_w_password(password);
         if let Err(e) = encrypted_envelope {
@@ -978,7 +985,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_id: PeerId,
     ) -> Result<(), String> {
         node_state.peer_id = peer_id;
-        node_state.opaque_node.id = node_state.peer_id.to_string();
+        node_state.opaque_node.id = node_state.username.clone();
         println!(
             "Peer ID is {} + index is {}",
             node_state.peer_id, node_state.index
@@ -1037,7 +1044,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     #[tauri::command]
-    fn local_login(state: State<TauriState>, password: String) -> Result<bool, String> {
+    fn local_login(
+        state: State<TauriState>,
+        username: String,
+        password: String,
+    ) -> Result<bool, String> {
         let mut node_state = state.0.lock().unwrap();
         let file_path = "tmp/login.envelope".to_string();
         if !Path::new(&file_path).exists() {
@@ -1057,6 +1068,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(e.to_string());
         }
         let envelope = envelope.unwrap();
+        if envelope.username != username {
+            return Ok(false);
+        }
+        node_state.username = username;
         let peer_id = PeerId::from_str(&envelope.peer_id);
         if let Err(e) = peer_id {
             return Err(e.to_string());
@@ -1147,13 +1162,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(notepad.unwrap().to_string())
     }
 
+    // TauriToRustCommand
     fn tauri_send_message_to_peer(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         message: BroadcastMessage,
         peer_id: PeerId,
-    ) -> Result<(), Box<dyn Error>> {
-        let serialized_msg = serde_json::to_vec(&message)?;
+    ) -> Result<(), String> {
+        let serialized_msg = serde_json::to_vec(&message);
+        if let Err(e) = serialized_msg {
+            return Err(e.to_string());
+        }
+        let serialized_msg = serialized_msg.unwrap();
+
         let state = state_arc.lock().unwrap();
         let topic = state.point_to_point_topics.get(&peer_id).unwrap();
         if let Err(e) = swarm
@@ -1161,9 +1182,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .gossipsub
             .publish(topic.clone(), serialized_msg)
         {
-            return Err(Box::new(e));
+            return Err(e.to_string());
         }
         Ok(())
+    }
+
+    #[tauri::command]
+    fn set_username(state: State<TauriState>, username: String) {
+        let mut node_state = state.0.lock().unwrap();
+        node_state.username = username.clone();
+        node_state.opaque_node.id = username;
     }
 
     tauri::Builder::default()
@@ -1176,6 +1204,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             get_peers,
             add_peer_tauri,
             remove_peer_tauri,
+            set_username
         ])
         .manage(TauriState(Arc::clone(&state_arc), tx))
         .run(tauri::generate_context!())
