@@ -10,6 +10,7 @@ mod local_encdec_test {
         let peer_keypair = Keypair::new();
         let envelope = LocalEnvelope {
             keypair,
+            username: peer_id.clone(),
             libp2p_keypair_bytes: libp2p::identity::ed25519::Keypair::generate().to_bytes(),
             peer_id,
             peer_public_key: peer_keypair.public_key,

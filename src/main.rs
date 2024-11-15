@@ -2,6 +2,7 @@ mod acss;
 mod coin;
 mod dkg;
 mod dpss;
+mod file_sss;
 mod keypair;
 mod local_envelope;
 mod opaque;
