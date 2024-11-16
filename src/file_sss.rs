@@ -18,9 +18,9 @@ impl FileSSS {
         // Scalar conversion easier
         // however, Scalar conversion sometimes fails if the highest order bit is 1, so convert 31
         // bytes at a time
-        let num_polynomials = file.len().div_ceil((SCALAR_SIZE - 1));
         let mut file_data: Vec<u8> = Vec::from(file.len().to_le_bytes());
         file_data.extend_from_slice(file.as_slice());
+        let num_polynomials = file_data.len().div_ceil(SCALAR_SIZE - 1);
         file_data.resize(num_polynomials * (SCALAR_SIZE - 1), 0);
 
         let secrets: Vec<Scalar> = file_data
@@ -73,6 +73,7 @@ impl FileSSS {
         let (size, result_bytes) = result.split_at(std::mem::size_of::<usize>());
         let size: [u8; 8] = size.try_into().unwrap();
         let length = usize::from_le_bytes(size);
+        println!("{:?}", result_bytes.len());
 
         let mut result = Vec::from(result_bytes);
         result.truncate(length);
