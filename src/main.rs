@@ -23,10 +23,13 @@ use dpss::DPSS;
 use futures::prelude::*;
 use itertools::Itertools;
 use keypair::{Keypair, PublicKey};
-use libp2p::gossipsub::{IdentTopic, Message, MessageId};
-use libp2p::kad::store::MemoryStore;
+use libp2p::kad::{store::MemoryStore, GetRecordOk, GetRecordResult, PeerRecord};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{gossipsub, identify, kad, mdns, PeerId, Swarm};
+use libp2p::{
+    gossipsub::{IdentTopic, Message, MessageId},
+    kad::QueryResult,
+};
 use local_envelope::{LocalEncryptedEnvelope, LocalEnvelope};
 use opaque::{
     EncryptedEnvelope, Envelope, LoginStartRequest, LoginStartResponse, P2POpaqueError,
@@ -38,15 +41,20 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::io::Write;
+use std::num::NonZeroUsize;
+use std::ops::Add;
 use std::ops::Index;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 use tauri::{Manager, State};
 use tokio::{io, io::AsyncBufReadExt, io::AsyncReadExt, select, sync::mpsc};
 use tracing_subscriber::EnvFilter;
@@ -179,7 +187,7 @@ struct P2PBehaviour {
 }
 
 enum TauriToRustCommand {
-    NewSwarm(libp2p::identity::ed25519::Keypair),
+    NewSwarm(libp2p::identity::ed25519::Keypair, String),
     AddPeer(String),
     RemovePeer(String),
     SendMessageToPeer(BroadcastMessage, PeerId),
@@ -200,63 +208,68 @@ const BOOTNODES: [&str; 4] = [
 ];*/
 fn new_swarm(
     keypair: libp2p::identity::ed25519::Keypair,
+    username: String,
 ) -> Result<Swarm<P2PBehaviour>, Box<dyn Error>> {
-    let mut swarm =
-        libp2p::SwarmBuilder::with_existing_identity(libp2p::identity::Keypair::from(keypair))
-            .with_tokio()
-            .with_tcp(
-                libp2p::tcp::Config::default(),
-                libp2p::tls::Config::new,
-                libp2p::yamux::Config::default,
-            )?
-            .with_behaviour(|key| {
-                let message_id_fn = |message: &gossipsub::Message| {
-                    let mut hasher = Sha3_256::new();
-                    hasher.update(message.data.clone());
-                    hasher.update(message.source.unwrap().to_bytes());
-                    let message_hash = hasher.finalize();
-                    gossipsub::MessageId::from(format!("{:X}", message_hash))
-                };
+    let libp2p_keypair = libp2p::identity::Keypair::from(keypair);
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(libp2p_keypair.clone())
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::tls::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_behaviour(|key| {
+            let message_id_fn = |message: &gossipsub::Message| {
+                let mut hasher = Sha3_256::new();
+                hasher.update(message.data.clone());
+                hasher.update(message.source.unwrap().to_bytes());
+                let message_hash = hasher.finalize();
+                gossipsub::MessageId::from(format!("{:X}", message_hash))
+            };
 
-                let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(10))
-                    .validation_mode(gossipsub::ValidationMode::Strict)
-                    .message_id_fn(message_id_fn)
-                    .build()
-                    .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?;
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(10))
+                .validation_mode(gossipsub::ValidationMode::Strict)
+                .message_id_fn(message_id_fn)
+                .build()
+                .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?;
 
-                let gossipsub = gossipsub::Behaviour::new(
-                    gossipsub::MessageAuthenticity::Signed(key.clone()),
-                    gossipsub_config,
-                )?;
+            let gossipsub = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(key.clone()),
+                gossipsub_config,
+            )?;
 
-                let kad = kad::Behaviour::new(
-                    key.public().to_peer_id(),
-                    kad::store::MemoryStore::new(key.public().to_peer_id()),
-                );
+            let kad = kad::Behaviour::new(
+                key.public().to_peer_id(),
+                kad::store::MemoryStore::new(key.public().to_peer_id()),
+            );
 
-                let identify = identify::Behaviour::new(identify::Config::new(
-                    "/ipfs/id/1.0.0".to_string(),
-                    key.public(),
-                ));
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/ipfs/id/1.0.0".to_string(),
+                key.public(),
+            ));
 
-                let mdns = mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
-                    key.public().to_peer_id(),
-                )?;
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
 
-                Ok(P2PBehaviour {
-                    gossipsub,
-                    kad,
-                    identify,
-                    mdns,
-                })
-            })?
-            .with_swarm_config(|cfg| {
-                cfg.with_idle_connection_timeout(std::time::Duration::from_secs(u64::MAX))
+            Ok(P2PBehaviour {
+                gossipsub,
+                kad,
+                identify,
+                mdns,
             })
-            .build();
+        })?
+        .with_swarm_config(|cfg| {
+            cfg.with_idle_connection_timeout(std::time::Duration::from_secs(u64::MAX))
+        })
+        .build();
     swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Server));
+    if &username != "" {
+        let peer_ids = swarm
+            .behaviour_mut()
+            .kad
+            .get_record(libp2p::kad::RecordKey::new(&Vec::from(username.as_bytes())));
+    }
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
     Ok(swarm)
 }
@@ -293,7 +306,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     let state_arc = Arc::new(Mutex::new(state));
 
-    let mut swarm = new_swarm(libp2p::identity::ed25519::Keypair::generate())?;
+    let mut swarm = new_swarm(
+        libp2p::identity::ed25519::Keypair::generate(),
+        "".to_string(),
+    )?;
 
     // the bootstrap nodes aren't listening on this topic, need to run own nodes
     /*let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
@@ -841,6 +857,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
+    fn update_peer_ids_kademlia_record(
+        state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+    ) -> Result<(), Box<dyn Error>> {
+        let state = state_arc.lock().unwrap();
+        let serialized_peers = serde_json::to_vec(&state.peer_id_to_index)?;
+        let mut pk_record =
+            kad::Record::new(Vec::from(state.username.as_bytes()), serialized_peers);
+        pk_record.publisher = Some(*swarm.local_peer_id());
+        pk_record.expires = Some(Instant::now().add(Duration::from_secs(86400)));
+
+        swarm.behaviour_mut().kad.put_record(
+            pk_record,
+            kad::Quorum::N(NonZeroUsize::new(state.threshold).unwrap()),
+        )?;
+
+        Ok(())
+    }
+
     fn add_peer(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
@@ -975,9 +1010,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         let tx_clone = state.1.clone();
         let keypair = libp2p_keypair.clone();
+        let username = node_state.username.clone();
         tokio::spawn(async move {
             tx_clone
-                .send(TauriToRustCommand::NewSwarm(keypair))
+                .send(TauriToRustCommand::NewSwarm(keypair, username))
                 .await
                 .unwrap();
         });
@@ -1006,6 +1042,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_state.libp2p_keypair_bytes = libp2p_keypair_bytes;
         node_state.opaque_node.keypair = keypair;
 
+        let mut refresh_username = "".to_string();
         if node_state.peer_id_to_index.len() == 0 {
             let file_path = "tmp/peers.list".to_string();
             if Path::new(&file_path).exists() {
@@ -1023,6 +1060,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let peers_list = peers_list.unwrap();
                 node_state.peer_id_to_index = peers_list.0;
                 node_state.peer_recoveries = peers_list.1;
+            } else {
+                refresh_username = node_state.username.clone();
             }
         }
 
@@ -1043,9 +1082,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         tokio::spawn(async move {
-            tx.send(TauriToRustCommand::NewSwarm(libp2p_keypair.unwrap()))
-                .await
-                .unwrap();
+            tx.send(TauriToRustCommand::NewSwarm(
+                libp2p_keypair.unwrap(),
+                refresh_username,
+            ))
+            .await
+            .unwrap();
         });
         Ok(())
     }
@@ -1194,6 +1236,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
+    fn set_peer_ids(state_arc: Arc<Mutex<NodeState>>, result: PeerRecord) {
+        let mut node_state = state_arc.lock().unwrap();
+        let peer_ids_map: HashMap<PeerId, i32> =
+            serde_json::from_slice(result.record.value.as_slice()).unwrap();
+        node_state.peer_id_to_index = peer_ids_map;
+    }
+
     #[tauri::command]
     fn set_username(state: State<TauriState>, username: String) {
         let mut node_state = state.0.lock().unwrap();
@@ -1223,18 +1272,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_stdin(&mut state, &mut swarm, line);
             }*/
             Some(res) = rx.recv() => match res {
-                TauriToRustCommand::NewSwarm(keypair) => {
-                    swarm = new_swarm(keypair)?;
+                TauriToRustCommand::NewSwarm(keypair, username) => {
+                    swarm = new_swarm(keypair, username)?;
                 }
                 TauriToRustCommand::AddPeer(peer) => {
                     let peer_id = PeerId::from_str(&peer)?;
                     add_peer(state_arc.clone(), &mut swarm, peer_id)?;
                     update_peer_ids(state_arc.clone())?;
+                    update_peer_ids_kademlia_record(state_arc.clone(), &mut swarm)?;
                 }
                 TauriToRustCommand::RemovePeer(peer) => {
                     let peer_id = PeerId::from_str(&peer)?;
                     remove_peer(state_arc.clone(), &mut swarm, peer_id)?;
                     update_peer_ids(state_arc.clone())?;
+                    update_peer_ids_kademlia_record(state_arc.clone(), &mut swarm)?;
                 },
                 TauriToRustCommand::SendMessageToPeer(msg, peer_id) => {
                     tauri_send_message_to_peer(state_arc.clone(), &mut swarm, msg, peer_id)?;
@@ -1260,6 +1311,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         remove_peer(state_arc.clone(), &mut swarm, peer)?;
                     }
                     update_peer_ids(state_arc.clone())?;
+                },
+                SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {result, .. })) => {
+                    if let QueryResult::GetRecord(r) = result {
+                        if let Ok(GetRecordOk::FoundRecord(r_ok)) = r {
+                            set_peer_ids(state_arc.clone(), r_ok);
+                        }
+                    }
                 },
                 SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
