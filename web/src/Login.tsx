@@ -5,12 +5,13 @@ import { Link, useNavigate } from "react-router-dom";
 import { AuthContext } from "./components/AuthContext";
 
 function Login() {
+  const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
 
   const navigate = useNavigate();
 
   const login = () => {
-    invoke("local_login", { password })
+    invoke("local_login", { username, password })
       .then((resp) => {
         setIsLoggedIn(true);
         toast.success("Successfully logged in!");
@@ -36,7 +37,14 @@ function Login() {
         marginTop: "-10em",
       }}
     >
-      <h1 style={{ textAlign: "center" }}>Welcome to OP2Paque!</h1>
+      <h1 style={{ textAlign: "center" }}>Welcome to Keyntsugi!</h1>
+      <label htmlFor="username">Username</label>
+      <input
+        type="text"
+        id="username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+      />
       <label htmlFor="password">Password</label>
       <input
         type="password"

@@ -17,52 +17,13 @@ const Recovery = () => {
     "/dnsaddr/bootstrap.libp2p.io/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
   ];
   const [peers, setPeers] = useState(PEERS);
-  const [isFirstStep, setIsFirstStep] = useState(true);
-  const [password, setPassword] = useState("");
-  const [debouncedPassword] = useDebounce(password, 1000);
-  const [result, setResult] = useState("");
-  const [contactOutputs, setContactOutputs] = useState<string[]>([]);
-  const [debouncedContactOutputs] = useDebounce(contactOutputs, 1000);
-  const [secondResult, setSecondResult] = useState("");
   const [selectedPeers, setSelectedPeers] = useState<boolean[]>([]);
-
-  useEffect(() => {
-    if (!debouncedPassword) {
-      return;
-    }
-    invoke("local_login_start", { password })
-      .then((resp) => {
-        setResult(resp as string);
-      })
-      .catch((err) => toast.error(err));
-  }, [debouncedPassword]);
-
-  useEffect(() => {
-    if (
-      !debouncedContactOutputs.length ||
-      !debouncedContactOutputs.some((output) => output !== "")
-    ) {
-      return;
-    }
-    invoke("local_login_finish", {
-      password,
-      peerResp: debouncedContactOutputs,
-    })
-      .then((resp) => {
-        setSecondResult(resp as string);
-      })
-      .catch((err) => toast.error(err));
-  }, [debouncedContactOutputs]);
+  const [username, setUsername] = useState<string>("");
+  const [password, setPassword] = useState("");
 
   useEffect(() => {
     setSelectedPeers(new Array(peers.length).fill(false));
   }, [peers]);
-
-  useEffect(() => {
-    if (contactOutputs.length === 0) {
-      setContactOutputs(new Array(peers.length).fill(""));
-    }
-  }, [peers, contactOutputs]);
 
   return (
     <div
@@ -106,90 +67,41 @@ const Recovery = () => {
           borderRadius={"1em"}
         />
       )}
-      <h2>Calculator</h2>
-      {isFirstStep ? (
-        <>
-          <p>
-            Send this output to each recovery contact via email, messenger, or
-            another communication medium you trust.
-          </p>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: "1em",
-            }}
-          >
-            <div>
-              <form
-                action=""
-                style={{ display: "flex", flexFlow: "column nowrap" }}
-              >
-                <label htmlFor="password">Password</label>
-                <input
-                  type="password"
-                  id="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </form>
-            </div>
-            <div>
-              <CopyableCodeblock contents={result} />
-              <button
-                style={{ float: "right", marginRight: 0, marginTop: "1em" }}
-                onClick={() => setIsFirstStep(false)}
-              >
-                Next
-              </button>
-            </div>
+      <h2>Recover your account</h2>
+      <div>
+        <form
+          action=""
+          style={{ display: "flex", flexFlow: "column nowrap", gap: "1em" }}
+        >
+          <label htmlFor="username">Username</label>
+          <input
+            type="text"
+            id="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+          <label htmlFor="password">Password</label>
+          <input
+            type="password"
+            id="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <div>
+            <button
+              style={{
+                float: "right",
+                marginRight: 0,
+                width: "fit-content",
+              }}
+              disabled={selectedPeers.filter((v) => v).length < 3}
+              onClick={() => navigate("/")}
+            >
+              Done
+            </button>
           </div>
-        </>
-      ) : (
-        <div>
-          <p>
-            Enter the outputs your contacts have returned to you in the inputs
-            below.
-          </p>
-          <form
-            action=""
-            style={{ display: "flex", flexFlow: "column nowrap" }}
-          >
-            {peers.map((peer, i) =>
-              selectedPeers[i] ? (
-                <div key={peer}>
-                  <label htmlFor={`contact-output-${i}`}>{peer} output</label>
-                  <textarea
-                    id={`contact-output-${i}`}
-                    style={{ resize: "none" }}
-                    value={contactOutputs[i]}
-                    onChange={(e) =>
-                      setContactOutputs((outputs) => {
-                        let newOutputs = [...outputs];
-                        newOutputs[i] = e.target.value;
-                        return newOutputs;
-                      })
-                    }
-                  />
-                </div>
-              ) : null
-            )}
-            <div>
-              <button
-                style={{
-                  float: "right",
-                  marginRight: 0,
-                  width: "fit-content",
-                }}
-                disabled={!contactOutputs.some((output) => output === "")}
-                onClick={() => navigate("/")}
-              >
-                Done
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+        </form>
+      </div>
     </div>
   );
 };
