@@ -31,6 +31,7 @@ mod opaque_test {
         let reg_finish_req = node_1.local_registration_finish(
             [0u8; 64],
             Vec::from([reg_start_resp_node_2, reg_start_resp_node_3]),
+            1,
         )?;
         assert_eq!(reg_finish_req[0].peer_public_key, node_1.keypair.public_key);
 
@@ -82,7 +83,7 @@ mod opaque_test {
         assert_eq!(reg_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]))?;
+            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
         assert_eq!(
             reg_finish_req.get(0).unwrap().peer_public_key,
             node_1.keypair.public_key
@@ -148,7 +149,7 @@ mod opaque_test {
         reg_start_resp = simulate_serde(reg_start_resp);
 
         let mut reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]))?;
+            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
         reg_finish_req = simulate_serde(reg_finish_req);
 
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
@@ -189,7 +190,7 @@ mod opaque_test {
 
         node_1 = simulate_serde(node_1);
         let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]))?;
+            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
 
         node_2 = simulate_serde(node_2);
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
@@ -220,7 +221,7 @@ mod opaque_test {
             node_2.peer_registration_start(reg_start_req, 2, HashSet::from([1, 2]))?;
 
         let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]))?;
+            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
 
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
 
@@ -260,13 +261,13 @@ mod opaque_test {
         assert_eq!(
             node_3
                 .clone()
-                .local_registration_finish([0u8; 64], Vec::from([reg_start_resp.clone()]))
+                .local_registration_finish([0u8; 64], Vec::from([reg_start_resp.clone()]), 0)
                 .unwrap_err(),
             P2POpaqueError::CryptoError("OPRF client not initialized".to_string())
         );
 
         let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]))?;
+            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
 
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
 
@@ -301,14 +302,14 @@ mod opaque_test {
 
         // finish registration with node 1's response, forge their peer ID and public key
         let mut malicious_reg_finish_req =
-            node_3.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]))?;
+            node_3.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
         malicious_reg_finish_req.get_mut(0).unwrap().peer_id = "Alice".to_string();
         malicious_reg_finish_req.get_mut(0).unwrap().peer_public_key = node_1.keypair.public_key;
         malicious_reg_finish_req.get_mut(0).unwrap().nonce = [1u8; 12];
         malicious_reg_finish_req
             .get_mut(0)
             .unwrap()
-            .encrypted_envelope = b"Bad data!!".to_vec();
+            .encrypted_envelope_share = b"Bad data!!".to_vec();
 
         assert_eq!(
             node_2

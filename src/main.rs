@@ -61,6 +61,7 @@ struct NodeState {
     index: i32,
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
+    threshold: usize,
     peer_id_to_index: HashMap<PeerId, i32>, // this node's recovery nodes' indices
     broadcast_topics: HashMap<PeerId, IdentTopic>, // subscribe to these two
     point_to_point_topics: HashMap<PeerId, IdentTopic>,
@@ -136,6 +137,7 @@ struct OPRFRecoveryStartRespMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct DPSSRefreshInitMessage {
     new_recovery_addresses: HashMap<PeerId, i32>,
+    new_threshold: usize,
     user_index: i32,
     user_id: PeerId,
     node_index: i32,
@@ -149,6 +151,7 @@ struct DPSSRefreshReshareMessage {
     dealer_shares_hat: HashMap<PeerId, ACSSDealerShare>,
     commitments: HashMap<Scalar, RistrettoPoint>,
     dealer_key: PublicKey,
+    new_threshold: usize,
     user_index: i32,
     user_id: PeerId,
     node_index: i32,
@@ -286,11 +289,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         registration_received: None,
         recovery_received: None,
         reshare_received: None,
+        threshold: 1,
     };
     let state_arc = Arc::new(Mutex::new(state));
-
-    let max_malicious = 1;
-    let threshold = 3;
 
     let mut swarm = new_swarm(libp2p::identity::ed25519::Keypair::generate())?;
 
@@ -315,8 +316,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn handle_message(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
-        max_malicious: usize,
-        threshold: usize,
         peer_id: PeerId,
         id: MessageId,
         message: Message,
@@ -334,7 +333,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_message_reg_init(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::OPRFRegStartRespMessage(msg) => {
-                handle_message_reg_start_resp(&mut state, swarm, peer_id, threshold, msg)
+                handle_message_reg_start_resp(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::OPRFRegFinishReqMessage(msg) => {
                 handle_message_reg_finish_req(&mut state, swarm, peer_id, msg)
@@ -343,13 +342,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_message_rec_start_req(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::OPRFRecoveryStartRespMessage(msg) => {
-                handle_message_rec_start_resp(&mut state, swarm, peer_id, threshold, msg)
+                handle_message_rec_start_resp(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::DPSSRefreshInitMessage(msg) => {
                 handle_message_dpss_init(&mut state, swarm, peer_id, msg)
             }
             BroadcastMessage::DPSSRefreshReshareMessage(msg) => {
-                handle_message_dpss_reshare(&mut state, swarm, peer_id, threshold, msg)
+                handle_message_dpss_reshare(&mut state, swarm, peer_id, msg)
             }
         }
     }
@@ -465,7 +464,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
-        threshold: usize,
         message: OPRFRegStartRespMessage,
     ) -> Result<(), Box<dyn Error>> {
         if let None = state.registration_received {
@@ -475,7 +473,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut s = state.registration_received.take().unwrap();
         s.insert(peer_id, message.reg_start_resp);
 
-        if s.len() < threshold {
+        if s.len() < state.threshold {
             state.registration_received = Some(s);
             return Ok(());
         }
@@ -483,6 +481,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let reg_finish_reqs = state.opaque_node.local_registration_finish(
             state.libp2p_keypair_bytes,
             s.values().map(|v| v.clone()).collect(),
+            state.threshold,
         )?;
         for reg_finish_req in reg_finish_reqs.iter() {
             let index = state.peer_id_to_index.get(&peer_id).unwrap().clone();
@@ -615,7 +614,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
-        threshold: usize,
         message: OPRFRecoveryStartRespMessage,
     ) -> Result<(), Box<dyn Error>> {
         if let None = state.recovery_received {
@@ -625,7 +623,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut s = state.recovery_received.take().unwrap();
         s.insert(peer_id, message.recovery_start_resp);
 
-        if s.len() < threshold {
+        if s.len() < state.threshold {
             state.recovery_received = Some(s);
             return Ok(());
         }
@@ -657,11 +655,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         old_recovery_addresses: HashMap<PeerId, i32>,
         new_recovery_addresses: HashMap<PeerId, i32>,
+        new_threshold: usize,
     ) -> Result<NodeState, Box<dyn Error>> {
+        if new_threshold + 1 > new_recovery_addresses.len() {
+            return Err(Box::from(
+                "Not enough recovery addresses for this threshold",
+            ));
+        }
         for (address, index) in old_recovery_addresses.iter() {
             let topic = state.point_to_point_topics.get(&address).unwrap();
             let init_message = serde_json::to_vec(&DPSSRefreshInitMessage {
                 new_recovery_addresses: new_recovery_addresses.clone(),
+                new_threshold,
                 user_index: state.index,
                 user_id: state.peer_id,
                 node_index: index.clone(),
@@ -724,6 +729,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
                     .collect(),
                 dealer_key: state.opaque_keypair.private_key,
+                new_threshold: message.new_threshold,
                 commitments: old_commitments.clone(),
                 user_index: state.index,
                 user_id: state.peer_id,
@@ -756,7 +762,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: &mut NodeState,
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
-        threshold: usize,
         message: DPSSRefreshReshareMessage,
     ) -> Result<(), Box<dyn Error>> {
         let node_share = ACSS::share(
@@ -785,7 +790,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         s.insert(peer_id, (node_share, node_share_hat));
 
-        if s.len() < threshold {
+        if s.len() < state.threshold {
             state.reshare_received = Some(s);
             return Ok(());
         }
@@ -819,6 +824,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 message.node_index,
             ),
         );
+        state.threshold = message.new_threshold;
 
         Ok(())
     }
@@ -1260,7 +1266,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     message_id: id,
                     message,
                 })) => {
-                    handle_message(state_arc.clone(), &mut swarm, max_malicious, threshold, peer_id, id, message)?;
+                    handle_message(state_arc.clone(), &mut swarm, peer_id, id, message)?;
                     update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {

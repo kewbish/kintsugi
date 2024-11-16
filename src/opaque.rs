@@ -1,3 +1,4 @@
+use crate::file_sss::FileSSS;
 use crate::keypair::{Keypair, PublicKey};
 use crate::oprf::{OPRFClient, OPRFServer};
 use crate::polynomial::get_lagrange_coefficient;
@@ -133,7 +134,7 @@ pub struct RegFinishRequest {
     pub(crate) peer_public_key: PublicKey,
     pub(crate) peer_id: String,
     pub(crate) nonce: [u8; 12],
-    pub(crate) encrypted_envelope: Vec<u8>,
+    pub(crate) encrypted_envelope_share: Vec<u8>,
     pub(crate) signature: Signature,
 }
 
@@ -143,14 +144,12 @@ pub struct Envelope {
     pub(crate) keypair: Keypair,
     #[serde_as(as = "Bytes")]
     pub(crate) libp2p_keypair_bytes: [u8; 64],
-    pub(crate) peer_public_key: PublicKey,
-    pub(crate) peer_id: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct EncryptedEnvelope {
     pub(crate) public_key: Option<PublicKey>,
-    pub(crate) encrypted_envelope: Vec<u8>,
+    pub(crate) encrypted_envelope_share: Vec<u8>,
     pub(crate) nonce: [u8; 12],
 }
 
@@ -159,6 +158,7 @@ impl P2POpaqueNode {
         &mut self,
         libp2p_keypair_bytes: [u8; 64],
         peer_resps: Vec<RegStartResponse>,
+        threshold: usize,
     ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
@@ -192,32 +192,49 @@ impl P2POpaqueNode {
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let mut result = Vec::new();
+        let envelope = Envelope {
+            keypair: self.keypair.clone(),
+            libp2p_keypair_bytes,
+        };
+        let plaintext = serde_json::to_string(&envelope);
+        if let Err(e) = plaintext {
+            return Err(P2POpaqueError::SerializationError(
+                "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
+        if let Err(e) = ciphertext {
+            return Err(P2POpaqueError::CryptoError(
+                "Encryption of envelope failed: ".to_string() + &e.to_string(),
+            ));
+        }
+        let ciphertext = ciphertext.unwrap();
+
+        let other_indices: HashSet<Scalar> = peer_resps
+            .iter()
+            .map(|resp| i32_to_scalar(resp.index))
+            .collect();
+        let ciphertext_shares =
+            FileSSS::split(ciphertext.clone(), other_indices.clone(), threshold);
+
         for peer_resp in peer_resps.iter() {
-            let envelope = Envelope {
-                keypair: self.keypair.clone(),
-                libp2p_keypair_bytes,
-                peer_public_key: peer_resp.peer_public_key,
-                peer_id: peer_resp.peer_id.clone(),
-            };
-            let plaintext = serde_json::to_string(&envelope);
-            if let Err(e) = plaintext {
+            let share_serialized = serde_json::to_vec(
+                &ciphertext_shares
+                    .get(&i32_to_scalar(peer_resp.index))
+                    .unwrap(),
+            );
+            if let Err(e) = share_serialized {
                 return Err(P2POpaqueError::SerializationError(
-                    "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
+                    "JSON serialization of envelope share failed: ".to_string() + &e.to_string(),
                 ));
             }
-            let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
-            if let Err(e) = ciphertext {
-                return Err(P2POpaqueError::CryptoError(
-                    "Encryption of envelope failed: ".to_string() + &e.to_string(),
-                ));
-            }
-            let ciphertext = ciphertext.unwrap();
-            let signature = Signature::new_with_keypair(&ciphertext, self.keypair.clone());
+            let share_serialized = share_serialized.unwrap();
+            let signature = Signature::new_with_keypair(&share_serialized, self.keypair.clone());
 
             result.push(RegFinishRequest {
                 peer_id: self.id.clone(),
                 peer_public_key: self.keypair.public_key,
-                encrypted_envelope: ciphertext,
+                encrypted_envelope_share: share_serialized,
                 nonce: nonce_bytes,
                 signature,
             })
@@ -238,7 +255,7 @@ impl P2POpaqueNode {
             return Ok(());
         }
         if !peer_req.signature.verify(
-            &peer_req.encrypted_envelope,
+            &peer_req.encrypted_envelope_share,
             peer_public_key.unwrap().clone(),
         ) {
             return Err(P2POpaqueError::CryptoError(
@@ -249,7 +266,7 @@ impl P2POpaqueNode {
             peer_req.peer_id,
             EncryptedEnvelope {
                 public_key: Some(peer_req.peer_public_key),
-                encrypted_envelope: peer_req.encrypted_envelope,
+                encrypted_envelope_share: peer_req.encrypted_envelope_share,
                 nonce: peer_req.nonce,
             },
         );
@@ -359,8 +376,23 @@ impl P2POpaqueNode {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let nonce_bytes = peer_resps[0].envelope.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext_bytes =
-            cipher.decrypt(nonce, peer_resps[0].envelope.encrypted_envelope.as_ref());
+
+        let mut encrypted_envelope_shares: HashMap<Scalar, Vec<Scalar>> = HashMap::new();
+        for peer_resp in peer_resps.iter() {
+            let deserialized_share: Result<Vec<Scalar>, _> =
+                serde_json::from_slice(peer_resp.envelope.encrypted_envelope_share.as_slice());
+            if let Err(e) = deserialized_share {
+                return Err(P2POpaqueError::SerializationError(
+                    "JSON deserialization of envelope share failed: ".to_string() + &e.to_string(),
+                ));
+            }
+            let deserialized_share = deserialized_share.unwrap();
+            encrypted_envelope_shares.insert(i32_to_scalar(peer_resp.index), deserialized_share);
+        }
+
+        let ciphertext_recombined = FileSSS::reconstruct(encrypted_envelope_shares);
+
+        let plaintext_bytes = cipher.decrypt(nonce, ciphertext_recombined.as_slice());
         if let Err(e) = plaintext_bytes {
             return Err(P2POpaqueError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),
