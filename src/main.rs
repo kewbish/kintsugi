@@ -187,9 +187,15 @@ struct P2PBehaviour {
 }
 
 enum TauriToRustCommand {
+    RegStart(
+        libp2p::identity::ed25519::Keypair,
+        String,
+        String,
+        HashMap<PeerId, i32>,
+    ),
+    RecoveryStart(String, String, HashMap<PeerId, i32>),
+    RefreshStart(HashMap<PeerId, i32>, i32),
     NewSwarm(libp2p::identity::ed25519::Keypair, String),
-    AddPeer(String),
-    RemovePeer(String),
     SendMessageToPeer(BroadcastMessage, PeerId),
 }
 
@@ -370,11 +376,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     fn handle_reg_init(
-        state: &mut NodeState,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         password: String,
         recovery_addresses: HashMap<PeerId, i32>,
     ) -> Result<NodeState, Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
+
         let s = Scalar::random(&mut OsRng);
         let (acss_dealer_share, phi, phi_hat) = ACSS::share_dealer(
             state.acss_inputs.clone(),
@@ -550,11 +558,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     fn handle_recovery_init(
-        state: &mut NodeState,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
+        username: String,
         password: String,
         recovery_addresses: HashMap<PeerId, i32>,
     ) -> Result<NodeState, Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
+        state.username = username;
         state.recovery_received = Some(HashMap::new());
 
         let recovery_start_req = state.opaque_node.local_login_start(password)?;
@@ -667,18 +678,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     fn handle_refresh_init(
-        state: &mut NodeState,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
-        old_recovery_addresses: HashMap<PeerId, i32>,
         new_recovery_addresses: HashMap<PeerId, i32>,
         new_threshold: usize,
     ) -> Result<NodeState, Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
         if new_threshold + 1 > new_recovery_addresses.len() {
             return Err(Box::from(
                 "Not enough recovery addresses for this threshold",
             ));
         }
-        for (address, index) in old_recovery_addresses.iter() {
+        for (address, index) in state.peer_id_to_index.iter() {
             let topic = state.point_to_point_topics.get(&address).unwrap();
             let init_message = serde_json::to_vec(&DPSSRefreshInitMessage {
                 new_recovery_addresses: new_recovery_addresses.clone(),
@@ -936,33 +947,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     #[tauri::command]
-    fn get_peers(state: State<TauriState>) -> Vec<PeerId> {
+    fn get_peers(state: State<TauriState>) -> Vec<String> {
         let node_state = state.0.lock().unwrap();
-        return Vec::from_iter(node_state.peer_id_to_index.keys().map(|v| v.clone()));
-    }
-
-    #[tauri::command]
-    fn add_peer_tauri(state: State<TauriState>, peer: String) -> Result<(), String> {
-        let tx_clone = state.1.clone();
-        tokio::spawn(async move {
-            tx_clone
-                .send(TauriToRustCommand::AddPeer(peer))
-                .await
-                .unwrap();
-        });
-        Ok(())
-    }
-
-    #[tauri::command]
-    fn remove_peer_tauri(state: State<TauriState>, peer: String) -> Result<(), String> {
-        let tx_clone = state.1.clone();
-        tokio::spawn(async move {
-            tx_clone
-                .send(TauriToRustCommand::RemovePeer(peer))
-                .await
-                .unwrap();
-        });
-        Ok(())
+        return Vec::from_iter(
+            node_state
+                .point_to_point_topics
+                .keys()
+                .map(|v| v.to_string()),
+        );
     }
 
     #[tauri::command]
@@ -970,6 +962,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: State<TauriState>,
         username: String,
         password: String,
+        recovery_addresses: HashMap<String, i32>,
     ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
         let file_path = "tmp/login.envelope".to_string();
@@ -994,7 +987,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer_id: node_state.peer_id.to_string(),
             username,
         };
-        let encrypted_envelope = envelope.clone().encrypt_w_password(password);
+        let encrypted_envelope = envelope.clone().encrypt_w_password(password.clone());
         if let Err(e) = encrypted_envelope {
             return Err(e.to_string());
         }
@@ -1011,9 +1004,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let tx_clone = state.1.clone();
         let keypair = libp2p_keypair.clone();
         let username = node_state.username.clone();
+        let password_clone = password.clone();
+        let recovery_nodes: HashMap<PeerId, i32> = recovery_addresses
+            .iter()
+            .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
+            .collect();
         tokio::spawn(async move {
             tx_clone
-                .send(TauriToRustCommand::NewSwarm(keypair, username))
+                .send(TauriToRustCommand::RegStart(
+                    keypair,
+                    username,
+                    password_clone,
+                    recovery_nodes,
+                ))
                 .await
                 .unwrap();
         });
@@ -1250,6 +1253,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_state.opaque_node.id = username;
     }
 
+    #[tauri::command]
+    fn local_recovery(
+        state: State<TauriState>,
+        username: String,
+        password: String,
+        recovery_nodes: HashMap<String, i32>,
+    ) -> Result<(), String> {
+        let mut node_state = state.0.lock().unwrap();
+        node_state.username = username.clone();
+        node_state.opaque_node.id = username.clone();
+        let tx_clone = state.1.clone();
+        let recovery_nodes_map: HashMap<PeerId, i32> = recovery_nodes
+            .iter()
+            .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
+            .collect();
+        tokio::spawn(async move {
+            tx_clone
+                .send(TauriToRustCommand::RecoveryStart(
+                    username,
+                    password,
+                    recovery_nodes_map,
+                ))
+                .await
+                .unwrap();
+        });
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn local_refresh(
+        state: State<TauriState>,
+        new_recovery_addresses: HashMap<String, i32>,
+        new_threshold: i32,
+    ) -> Result<(), String> {
+        let recovery_nodes_map: HashMap<PeerId, i32> = new_recovery_addresses
+            .iter()
+            .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
+            .collect();
+        let tx_clone = state.1.clone();
+        tokio::spawn(async move {
+            tx_clone
+                .send(TauriToRustCommand::RefreshStart(
+                    recovery_nodes_map,
+                    new_threshold,
+                ))
+                .await
+                .unwrap();
+        });
+        Ok(())
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_peer_id,
@@ -1258,9 +1312,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             read_notepad,
             save_notepad,
             get_peers,
-            add_peer_tauri,
-            remove_peer_tauri,
-            set_username
+            set_username,
+            local_recovery,
+            local_refresh
         ])
         .manage(TauriState(Arc::clone(&state_arc), tx))
         .run(tauri::generate_context!())
@@ -1275,18 +1329,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 TauriToRustCommand::NewSwarm(keypair, username) => {
                     swarm = new_swarm(keypair, username)?;
                 }
-                TauriToRustCommand::AddPeer(peer) => {
-                    let peer_id = PeerId::from_str(&peer)?;
-                    add_peer(state_arc.clone(), &mut swarm, peer_id)?;
-                    update_peer_ids(state_arc.clone())?;
-                    update_peer_ids_kademlia_record(state_arc.clone(), &mut swarm)?;
+                TauriToRustCommand::RegStart(keypair, username, password, recovery_nodes) => {
+                    swarm = new_swarm(keypair, username)?;
+                    handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes)?;
                 }
-                TauriToRustCommand::RemovePeer(peer) => {
-                    let peer_id = PeerId::from_str(&peer)?;
-                    remove_peer(state_arc.clone(), &mut swarm, peer_id)?;
-                    update_peer_ids(state_arc.clone())?;
-                    update_peer_ids_kademlia_record(state_arc.clone(), &mut swarm)?;
-                },
+                TauriToRustCommand::RecoveryStart(username, password, recovery_nodes) => {
+                    handle_recovery_init(state_arc.clone(), &mut swarm, username, password, recovery_nodes)?;
+                }
+                TauriToRustCommand::RefreshStart(recovery_nodes, new_threshold) => {
+                    handle_refresh_init(state_arc.clone(), &mut swarm, recovery_nodes, new_threshold as usize)?;
+                }
                 TauriToRustCommand::SendMessageToPeer(msg, peer_id) => {
                     tauri_send_message_to_peer(state_arc.clone(), &mut swarm, msg, peer_id)?;
                 }

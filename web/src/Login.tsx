@@ -59,7 +59,8 @@ function Login() {
         onClick={() => login()}
       />
       <p style={{ textAlign: "center" }}>
-        <Link to="/register">Register</Link>
+        <Link to="/register">Register</Link> ∘{" "}
+        <Link to="/recovery">Recover</Link>
       </p>
     </div>
   );

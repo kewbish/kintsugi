@@ -1,17 +1,42 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect } from "react";
+import toast from "react-hot-toast";
+import { Link } from "react-router-dom";
 import User from "./components/User";
 
 const ContactSelection = () => {
-  const USERS = [
-    "/dnsaddr/bootstrap.libp2p.io/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-    "/dnsaddr/bootstrap.libp2p.io/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-    "/dnsaddr/bootstrap.libp2p.io/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-    "/dnsaddr/bootstrap.libp2p.io/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-  ];
-  const [peers, setPeers] = useState(USERS);
-  const navigate = useNavigate();
+  const [peers, setPeers] = useState<string[]>([]);
   const [currentInput, setCurrentInput] = useState("");
+  const [threshold, setThreshold] = useState(3);
+  const [hasLoaded, setHasLoaded] = useState(false);
+
+  useEffect(() => {
+    invoke("get_peers")
+      .then((resp) => {
+        setPeers(resp as string[]);
+        setHasLoaded(true);
+      })
+      .catch((err) => toast.error(err));
+  }, []);
+
+  useEffect(() => {
+    if (hasLoaded) {
+      let newRecoveryAddresses = new Map();
+      for (const [i, address] of peers.entries()) {
+        newRecoveryAddresses.set(address, i + 1);
+      }
+      invoke("local_refresh", {
+        newRecoveryAddresses,
+        newThreshold: threshold - 1,
+      })
+        .then((_) => {
+          toast.success("Successfully updated!");
+        })
+        .catch((err) => {
+          toast.error(err);
+        });
+    }
+  }, [peers]);
 
   return (
     <div
@@ -63,6 +88,20 @@ const ContactSelection = () => {
           }}
         >
           Add contact
+        </button>
+      </div>
+      <hr style={{ marginTop: "1em" }} />
+      <div style={{ display: "flex", marginTop: "1em" }}>
+        <label htmlFor="threshold">Threshold</label>
+        <input
+          type="number"
+          style={{ flexGrow: 1 }}
+          value={threshold}
+          onChange={(e) => setThreshold(Number(e.target.value))}
+          id="threshold"
+        />
+        <button style={{ marginRight: 0 }} onClick={changePeers}>
+          Update threshold
         </button>
       </div>
     </div>

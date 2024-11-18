@@ -16,7 +16,11 @@ function Register() {
   const [recoveryNodes, setRecoveryNodes] = useState([""]);
 
   const register = () => {
-    invoke("local_register", { username, password })
+    let recoveryAddresses = new Map();
+    for (const [i, address] of recoveryNodes.entries()) {
+      recoveryAddresses.set(address, i + 1);
+    }
+    invoke("local_register", { username, password, recoveryAddresses })
       .then((_) => {
         setIsLoggedIn(true);
         toast.success("Successfully registered!");
@@ -180,7 +184,8 @@ function Register() {
         </>
       ) : null}
       <p style={{ textAlign: "center" }}>
-        <Link to="/login">Login</Link>
+        <Link to="/register">Register</Link> ∘{" "}
+        <Link to="/recovery">Recover</Link>
       </p>
     </div>
   );

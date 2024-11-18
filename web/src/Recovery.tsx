@@ -10,20 +10,36 @@ import User from "./components/User";
 const Recovery = () => {
   const navigate = useNavigate();
 
-  const PEERS = [
-    "/dnsaddr/bootstrap.libp2p.io/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-    "/dnsaddr/bootstrap.libp2p.io/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-    "/dnsaddr/bootstrap.libp2p.io/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-    "/dnsaddr/bootstrap.libp2p.io/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-  ];
-  const [peers, setPeers] = useState(PEERS);
+  const [peers, setPeers] = useState<string[]>([]);
   const [selectedPeers, setSelectedPeers] = useState<boolean[]>([]);
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState("");
 
   useEffect(() => {
-    setSelectedPeers(new Array(peers.length).fill(false));
-  }, [peers]);
+    invoke("get_peers")
+      .then((resp) => {
+        setPeers(resp as string[]);
+        setSelectedPeers(new Array((resp as string[]).length).fill(false));
+      })
+      .catch((err) => toast.error(err));
+  }, []);
+
+  const startRecovery = () => {
+    let recoveryNodes = new Map();
+    let count = 1;
+    for (const i in peers) {
+      if (selectedPeers[i]) {
+        recoveryNodes.set(count, peers[i]);
+        count += 1;
+      }
+    }
+    invoke("local_recovery", { username, password, recoveryNodes })
+      .then((resp) => {
+        toast.success("Successfully recovered keypair");
+        navigate("/");
+      })
+      .catch((err) => toast.error(err));
+  };
 
   return (
     <div
@@ -95,7 +111,7 @@ const Recovery = () => {
                 width: "fit-content",
               }}
               disabled={selectedPeers.filter((v) => v).length < 3}
-              onClick={() => navigate("/")}
+              onClick={startRecovery}
             >
               Done
             </button>
