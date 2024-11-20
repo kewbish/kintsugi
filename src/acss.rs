@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+#[allow(unused_imports)]
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
@@ -62,7 +63,7 @@ impl ACSS {
             let peer_public_key_point = CompressedRistretto::from_slice(public_key);
             if let Err(e) = peer_public_key_point {
                 return Err(P2POpaqueError::SerializationError(
-                    "Error deserializing public key".to_string(),
+                    "Error deserializing public key ".to_string() + &e.to_string(),
                 ));
             }
             let peer_public_key_point = peer_public_key_point.unwrap().decompress();

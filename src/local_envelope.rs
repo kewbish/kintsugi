@@ -1,13 +1,14 @@
 use crate::keypair::{Keypair, PublicKey};
 use crate::opaque::P2POpaqueError;
+
+#[allow(unused_imports)]
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
-use serde::{ser::SerializeStruct, Serialize, Serializer};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256};
 

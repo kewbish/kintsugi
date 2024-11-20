@@ -1,3 +1,6 @@
+// NOTE: the coin was used in the DKG, which is no longer required for the Kintsugi protocol
+#![allow(dead_code)]
+
 use curve25519_dalek::RistrettoPoint;
 
 use crate::{keypair::Keypair, signature::Signature};

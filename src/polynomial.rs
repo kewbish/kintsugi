@@ -30,6 +30,7 @@ impl Polynomial {
         polynomial.coeffs[0] = secret;
         polynomial
     }
+    #[allow(dead_code)]
     pub fn to_bytes(self) -> Result<Vec<u8>, P2POpaqueError> {
         let string_res = serde_json::to_string(&self);
         if let Err(e) = string_res {
@@ -39,6 +40,7 @@ impl Polynomial {
         }
         Ok(string_res.unwrap().into_bytes())
     }
+    #[allow(dead_code)]
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, P2POpaqueError> {
         let res: Result<Self, _> = serde_json::from_slice(&bytes);
         if let Err(e) = res {
@@ -77,6 +79,7 @@ pub struct BivariatePolynomial {
 }
 
 impl BivariatePolynomial {
+    #[allow(dead_code)]
     pub fn interpolate_0_j(&self, j: Scalar) -> Scalar {
         if !self.polynomials.contains_key(&j) {
             return Scalar::ZERO;

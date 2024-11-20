@@ -17,6 +17,6 @@ This Kintsugi implementation is accompagnied by a demo Tauri app using React as 
 - See [`src/`](./src) for the Rust backend
   - See [`src/main.rs`](./src/main.rs) for the network communication
   - See [`src/opaque.rs`](./src/opaque.rs) for the OPRF exchange
-  - Each module's associated tests can be found in the [`src/`](./src) directory and can be run via `cargo run test`
+  - Each module's associated tests can be found in the [`src/`](./src) directory and can be run via `cargo test`
 
 To run the app, start the React Vite server with `cd web/ && npm run dev`. Then, run `cargo run`, which will open the Tauri app window.

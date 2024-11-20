@@ -2,7 +2,7 @@
 mod opaque_test {
     use std::collections::HashSet;
 
-    use crate::opaque::{LoginStartRequest, P2POpaqueError, P2POpaqueNode, RegStartRequest};
+    use crate::opaque::{P2POpaqueError, P2POpaqueNode};
 
     #[test]
     fn test_happy_path() -> Result<(), P2POpaqueError> {
@@ -60,10 +60,10 @@ mod opaque_test {
             node_3.keypair.public_key
         );
 
-        let (keypair, _) = node_1.local_login_finish(
-            [0u8; 64],
-            Vec::from([login_start_resp_node_2, login_start_resp_node_3]),
-        )?;
+        let (keypair, _) = node_1.local_login_finish(Vec::from([
+            login_start_resp_node_2,
+            login_start_resp_node_3,
+        ]))?;
         assert_eq!(keypair.public_key, node_1.keypair.public_key);
         assert_eq!(keypair.private_key, node_1.keypair.private_key);
 
@@ -104,7 +104,7 @@ mod opaque_test {
 
         assert_eq!(
             node_1
-                .local_login_finish([0u8; 64], Vec::from([login_start_resp]))
+                .local_login_finish(Vec::from([login_start_resp]))
                 .unwrap_err(),
             P2POpaqueError::CryptoError("Decryption failed: aead::Error".to_string())
         );
@@ -120,7 +120,7 @@ mod opaque_test {
 
         assert_eq!(
             node_1
-                .local_login_finish([0u8; 64], Vec::from([login_start_resp]))
+                .local_login_finish(Vec::from([login_start_resp]))
                 .unwrap_err(),
             P2POpaqueError::CryptoError("Decryption failed: aead::Error".to_string())
         );
@@ -161,8 +161,7 @@ mod opaque_test {
             node_2.peer_login_start(login_start_req, 2, HashSet::from([1, 2]))?;
         login_start_resp = simulate_serde(login_start_resp);
 
-        let (mut keypair, _) =
-            node_1.local_login_finish([0u8; 64], Vec::from([login_start_resp]))?;
+        let (mut keypair, _) = node_1.local_login_finish(Vec::from([login_start_resp]))?;
         keypair = simulate_serde(keypair);
         assert_eq!(keypair.public_key, node_1.keypair.public_key);
         assert_eq!(keypair.private_key, node_1.keypair.private_key);
@@ -203,7 +202,7 @@ mod opaque_test {
             node_2.peer_login_start(login_start_req, 2, HashSet::from([1, 2]))?;
 
         node_1 = simulate_serde(node_1);
-        let (keypair, _) = node_1.local_login_finish([0u8; 64], Vec::from([login_start_resp]))?;
+        let (keypair, _) = node_1.local_login_finish(Vec::from([login_start_resp]))?;
         assert_eq!(keypair.public_key, node_1.keypair.public_key);
         assert_eq!(keypair.private_key, node_1.keypair.private_key);
 
@@ -278,7 +277,7 @@ mod opaque_test {
 
         assert_eq!(
             node_3
-                .local_login_finish([0u8; 64], Vec::from([login_start_resp]))
+                .local_login_finish(Vec::from([login_start_resp]))
                 .unwrap_err(),
             P2POpaqueError::CryptoError("OPRF client not initialized".to_string())
         );

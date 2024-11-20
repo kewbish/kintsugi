@@ -4,16 +4,17 @@ use crate::oprf::{OPRFClient, OPRFServer};
 use crate::polynomial::get_lagrange_coefficient;
 use crate::signature::Signature;
 use crate::util::i32_to_scalar;
+#[allow(unused_imports)]
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use derive_more::Display;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_with::{serde_as, Bytes};
+#[allow(unused_imports)]
 use sha3::{Digest, Sha3_256, Sha3_256Core, Sha3_512};
 use std::collections::{HashMap, HashSet};
 
@@ -341,7 +342,6 @@ impl P2POpaqueNode {
 impl P2POpaqueNode {
     pub fn local_login_finish(
         &self,
-        libp2p_keypair_bytes: [u8; 64],
         peer_resps: Vec<LoginStartResponse>,
     ) -> Result<(Keypair, [u8; 64]), P2POpaqueError> {
         if let None = self.oprf_client {

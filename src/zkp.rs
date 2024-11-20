@@ -6,7 +6,7 @@ use sha3::{Digest, Sha3_256};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZKP {
     // does not prove knowledge under encryption but verifies commitment
-    pub(crate) A: RistrettoPoint,
+    pub(crate) a: RistrettoPoint,
     pub(crate) z_1: Scalar,
     pub(crate) z_2: Scalar,
 }
@@ -20,10 +20,10 @@ impl ZKP {
     ) -> Self {
         let r_1 = Scalar::random(&mut OsRng);
         let r_2 = Scalar::random(&mut OsRng);
-        let A = r_1 * RISTRETTO_BASEPOINT_POINT + r_2 * h_point;
+        let a = r_1 * RISTRETTO_BASEPOINT_POINT + r_2 * h_point;
 
         let mut hasher = Sha3_256::new();
-        hasher.update(A.compress().to_bytes());
+        hasher.update(a.compress().to_bytes());
         hasher.update(h_point.compress().to_bytes());
         hasher.update(commitment.compress().to_bytes());
         let challenge_hash = hasher.finalize();
@@ -31,19 +31,19 @@ impl ZKP {
 
         let z_1 = r_1 + challenge * phi_i;
         let z_2 = r_2 + challenge * phi_hat_i;
-        ZKP { A, z_1, z_2 }
+        ZKP { a, z_1, z_2 }
     }
 
     pub fn verify(&self, h_point: RistrettoPoint, commitment: RistrettoPoint) -> bool {
         let mut hasher = Sha3_256::new();
-        hasher.update(self.A.compress().to_bytes());
+        hasher.update(self.a.compress().to_bytes());
         hasher.update(h_point.compress().to_bytes());
         hasher.update(commitment.compress().to_bytes());
         let challenge_hash = hasher.finalize();
         let challenge = Scalar::from_bytes_mod_order(challenge_hash.into());
 
         return self.z_1 * RISTRETTO_BASEPOINT_POINT + self.z_2 * h_point
-            == self.A + challenge * commitment;
+            == self.a + challenge * commitment;
     }
 }
 
@@ -51,6 +51,7 @@ impl ZKP {
 #[path = "zkp_tests.rs"]
 mod zkp_test;
 
+#[allow(dead_code)] // previously used for the DKG, no longer used
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DLPZKP {
     u: RistrettoPoint,
@@ -58,6 +59,7 @@ pub struct DLPZKP {
     z: Scalar,
 }
 
+#[allow(dead_code)]
 impl DLPZKP {
     pub fn new(secret: Scalar, base_point: RistrettoPoint, public_point: RistrettoPoint) -> Self {
         let r = Scalar::random(&mut OsRng);

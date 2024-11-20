@@ -10,6 +10,7 @@ use crate::{
 pub struct DPSS {}
 
 impl DPSS {
+    #[allow(dead_code)]
     fn reshare_old(
         s_i_d: Scalar,
         s_hat_i_d: Scalar,
@@ -21,12 +22,12 @@ impl DPSS {
         )
     }
 
+    #[allow(dead_code)]
     fn reshare(
         index: Scalar,
         polynomials: HashMap<Scalar, Polynomial>,
         polynomials_hats: HashMap<Scalar, Polynomial>,
         commitments: HashMap<Scalar, RistrettoPoint>,
-        h_point: RistrettoPoint,
     ) -> Result<(Scalar, Scalar, HashMap<Scalar, RistrettoPoint>), P2POpaqueError> {
         let polynomials_keys: HashSet<Scalar> = polynomials.keys().copied().collect();
         let polynomials_hats_keys: HashSet<Scalar> = polynomials_hats.keys().copied().collect();
@@ -58,11 +59,6 @@ impl DPSS {
             new_commitments.insert(i.clone(), new_commitment);
         }
 
-        /*Ok((
-            s_i_d_prime,
-            s_hat_i_d_prime,
-            s_i_d_prime * RISTRETTO_BASEPOINT_POINT + s_hat_i_d_prime * h_point,
-        ))*/
         Ok((s_i_d_prime, s_hat_i_d_prime, new_commitments))
     }
 
@@ -70,7 +66,6 @@ impl DPSS {
         evaluations: HashMap<Scalar, Scalar>,
         evaluations_hats: HashMap<Scalar, Scalar>,
         commitments: HashMap<Scalar, RistrettoPoint>,
-        h_point: RistrettoPoint,
     ) -> Result<(Scalar, Scalar, HashMap<Scalar, RistrettoPoint>), P2POpaqueError> {
         let evals_keys: HashSet<Scalar> = evaluations.keys().copied().collect();
         let evals_hats_keys: HashSet<Scalar> = evaluations_hats.keys().copied().collect();

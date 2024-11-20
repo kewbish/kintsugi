@@ -66,19 +66,12 @@ mod dpss_test {
             polynomials.clone(),
             polynomials_hats.clone(),
             commitments.clone(),
-            h_point,
         )
         .unwrap();
         assert_eq!(c_1, commitment_1.get(&Scalar::ONE).unwrap().clone());
 
-        let (new_share_2, new_share_hat_2, commitment_2) = DPSS::reshare(
-            scalar_two,
-            polynomials,
-            polynomials_hats,
-            commitments,
-            h_point,
-        )
-        .unwrap();
+        let (new_share_2, new_share_hat_2, commitment_2) =
+            DPSS::reshare(scalar_two, polynomials, polynomials_hats, commitments).unwrap();
         assert_eq!(c_2, commitment_2.get(&scalar_two).unwrap().clone());
 
         assert_eq!(commitment_1, commitment_2);
