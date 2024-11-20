@@ -57,7 +57,6 @@ use std::{
 };
 use tauri::{Manager, State};
 use tokio::{io, io::AsyncBufReadExt, io::AsyncReadExt, select, sync::mpsc};
-use tracing_subscriber::EnvFilter;
 use util::i32_to_scalar;
 
 // --- state structs --- //
@@ -282,10 +281,6 @@ fn new_swarm(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
     let state = NodeState {
         peer_id: PeerId::random(),        // temp

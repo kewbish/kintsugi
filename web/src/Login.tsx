@@ -37,7 +37,7 @@ function Login() {
         marginTop: "-10em",
       }}
     >
-      <h1 style={{ textAlign: "center" }}>Welcome to Keyntsugi!</h1>
+      <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>
       <label htmlFor="username">Username</label>
       <input
         type="text"

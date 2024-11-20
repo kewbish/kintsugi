@@ -17,8 +17,6 @@ use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256, Sha3_256Core, Sha3_512};
 use std::collections::{HashMap, HashSet};
 
-type CS = voprf::Ristretto255;
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Display)]
 pub enum P2POpaqueError {
     RegistrationError,

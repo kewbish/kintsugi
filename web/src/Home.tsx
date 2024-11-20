@@ -34,7 +34,7 @@ function Home() {
         marginTop: "-10em",
       }}
     >
-      <h1 style={{ textAlign: "center" }}>Welcome to Keyntsugi!</h1>
+      <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>
       <p>
         You are logged in. See your{" "}
         <Link to={"/contacts"}> recovery contacts</Link> or{" "}

@@ -48,7 +48,7 @@ function Register() {
         marginTop: "-5em",
       }}
     >
-      <h1 style={{ textAlign: "center" }}>Welcome to Keyntsugi!</h1>
+      <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>
       {stepNum === 0 ? (
         <div>
           <p>Enter the addresses of three or more trusted recovery nodes.</p>
