@@ -532,6 +532,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .opaque_node
             .peer_registration_finish(message.reg_finish_req)?;
 
+        let serialized_envelopes = serde_json::to_string(&state.opaque_node.envelopes)?;
+        let file_path = format!("tmp/{}_envelopes.list", state.username);
+        let mut file = fs::File::create(file_path)?;
+        file.write_all(serialized_envelopes.as_bytes())?;
+
         println!(
             "[REG FINISH] Finished peer registration for {}",
             message.user_id
@@ -840,7 +845,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             state.peer_id_to_index.clone(),
             state.peer_recoveries.clone(),
         ))?;
-        let file_path = "tmp/peers.list".to_string();
+        let file_path = format!("tmp/{}_peers.list", state.username);
         let mut file = fs::File::create(file_path)?;
         file.write_all(serialized_peers.as_bytes())?;
         Ok(())
@@ -943,7 +948,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         recovery_addresses: HashMap<String, i32>,
     ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
-        let file_path = "tmp/login.envelope".to_string();
+        let file_path = format!("tmp/{username}_login.envelope");
         if Path::new(&file_path).exists() {
             return Err("Encrypted envelope already exists".to_string());
         }
@@ -1025,7 +1030,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let mut refresh_username = "".to_string();
         if node_state.peer_id_to_index.len() == 0 {
-            let file_path = "tmp/peers.list".to_string();
+            let file_path = format!("tmp/{}_peers.list", node_state.username);
             if Path::new(&file_path).exists() {
                 let contents = std::fs::read_to_string(file_path);
                 if let Err(e) = contents {
@@ -1047,7 +1052,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         if node_state.opaque_node.envelopes.len() == 0 {
-            let file_path = "tmp/envelopes.list".to_string();
+            let file_path = format!("tmp/{}_envelopes.list", node_state.username);
             if Path::new(&file_path).exists() {
                 let contents = std::fs::read_to_string(file_path);
                 if let Err(e) = contents {
@@ -1080,7 +1085,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         password: String,
     ) -> Result<bool, String> {
         let mut node_state = state.0.lock().unwrap();
-        let file_path = "tmp/login.envelope".to_string();
+        let file_path = format!("tmp/{username}_login.envelope");
         if !Path::new(&file_path).exists() {
             return Err("Encrypted envelope does not exist".to_string());
         }
@@ -1140,7 +1145,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = serialized_ciphertext {
             return Err(e.to_string());
         }
-        let file_path = "tmp/notepad.txt".to_string();
+        let file_path = format!("tmp/{}_notepad.txt", node_state.username);
         if let Err(e) = fs::create_dir_all("tmp") {
             return Err(e.to_string());
         }
@@ -1159,7 +1164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     #[tauri::command]
     fn read_notepad(state: State<TauriState>) -> Result<String, String> {
-        let file_path = "tmp/notepad.txt".to_string();
+        let node_state = state.0.lock().unwrap();
+        let file_path = format!("tmp/{}_notepad.txt", node_state.username);
         if !Path::new(&file_path).exists() {
             return Ok("".to_string());
         }
@@ -1173,7 +1179,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(e.to_string());
         }
         let encrypted_notepad = encrypted_notepad.unwrap();
-        let node_state = state.0.lock().unwrap();
         let mut hasher = Sha3_256::new();
         hasher.update(node_state.opaque_keypair.private_key);
         let key = hasher.finalize();
