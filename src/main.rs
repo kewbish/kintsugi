@@ -39,7 +39,9 @@ use polynomial::Polynomial;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256};
+use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::Write;
@@ -79,6 +81,15 @@ struct NodeState {
     registration_received: Option<HashMap<PeerId, RegStartResponse>>,
     recovery_received: Option<HashMap<PeerId, LoginStartResponse>>,
     reshare_received: Option<HashMap<PeerId, (ACSSNodeShare, ACSSNodeShare)>>,
+}
+
+#[serde_as]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct BootstrapNodeState {
+    peer_id: PeerId,
+    opaque_keypair: Keypair,
+    #[serde_as(as = "Bytes")]
+    libp2p_keypair_bytes: [u8; 64],
 }
 
 // --- message structs --- //
@@ -199,13 +210,6 @@ struct EncryptedTauriNotepad {
     nonce: [u8; 12],
 }
 
-/* // from IPFS network
-const BOOTNODES: [&str; 4] = [
-    "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-    "QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-    "QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-    "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-];*/
 fn new_swarm(
     keypair: libp2p::identity::ed25519::Keypair,
     username: String,
@@ -277,7 +281,7 @@ fn new_swarm(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
-    let state = NodeState {
+    let mut state = NodeState {
         peer_id: PeerId::random(),        // temp
         peer_id_to_index: HashMap::new(), // temp
         username: "".to_string(),         // temp
@@ -300,6 +304,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
         reshare_received: None,
         threshold: 1,
     };
+
+    let args: Vec<String> = env::args().collect();
+    if args.len() == 3 && args[1] != "BOOTSTRAP" {
+        state.username = args[1].clone();
+        state.peer_id = PeerId::from_str(&args[2])?;
+    } else if args.len() == 3 && args[1] == "BOOTSTRAP" {
+        let file_path = format!("tmp/bootstrap_0.envelope");
+        if Path::new(&file_path).exists() {
+            let parsed_index: i32 = args[2].parse()?;
+            let file_path = format!("tmp/bootstrap_{}.envelope", parsed_index);
+            let contents = std::fs::read_to_string(file_path);
+            let bootstrap_node_state: BootstrapNodeState =
+                serde_json::from_str(&contents.unwrap())?;
+
+            state.username = format!("bootstrap{parsed_index}");
+            state.peer_id = bootstrap_node_state.peer_id;
+            state.libp2p_keypair_bytes = bootstrap_node_state.libp2p_keypair_bytes;
+            state.opaque_keypair = bootstrap_node_state.opaque_keypair;
+        } else {
+            for i in 0..3 {
+                let libp2p_keypair = libp2p::identity::ed25519::Keypair::generate();
+                let new_peer_id = PeerId::from_public_key(
+                    &(libp2p::identity::PublicKey::from(libp2p_keypair.public())),
+                );
+                let opaque_keypair = Keypair::new();
+
+                let serialized_keypairs = serde_json::to_string(&BootstrapNodeState {
+                    libp2p_keypair_bytes: libp2p_keypair.to_bytes(),
+                    peer_id: new_peer_id,
+                    opaque_keypair: opaque_keypair.clone(),
+                })?;
+                let file_path = format!("tmp/bootstrap_{i}.envelope");
+                let mut file = fs::File::create(file_path)?;
+                file.write_all(serialized_keypairs.as_bytes())?;
+
+                if i == 0 {
+                    state.username = format!("bootstrap{i}");
+                    state.peer_id = new_peer_id;
+                    state.libp2p_keypair_bytes = libp2p_keypair.to_bytes();
+                    state.opaque_keypair = opaque_keypair;
+                }
+            }
+        }
+
+        println!("[BOOTSTRAP] Node is running at peer ID {}", state.peer_id);
+    }
+
     let state_arc = Arc::new(Mutex::new(state));
 
     let mut swarm = new_swarm(
