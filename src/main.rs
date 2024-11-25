@@ -65,7 +65,6 @@ use util::i32_to_scalar;
 struct NodeState {
     peer_id: PeerId,
     username: String,
-    index: i32,
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
     threshold: usize,
@@ -105,7 +104,6 @@ struct OPRFRegInitMessage {
     reg_start_req: RegStartRequest,
     dealer_shares: HashMap<PeerId, ACSSDealerShare>,
     dealer_key: PublicKey,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -114,7 +112,6 @@ struct OPRFRegInitMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct OPRFRegStartRespMessage {
     reg_start_resp: RegStartResponse,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -123,7 +120,6 @@ struct OPRFRegStartRespMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct OPRFRegFinishReqMessage {
     reg_finish_req: RegFinishRequest,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -133,7 +129,6 @@ struct OPRFRegFinishReqMessage {
 struct OPRFRecoveryStartReqMessage {
     recovery_start_req: LoginStartRequest,
     other_indices: HashSet<i32>,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -142,7 +137,6 @@ struct OPRFRecoveryStartReqMessage {
 #[derive(Serialize, Deserialize, Debug)]
 struct OPRFRecoveryStartRespMessage {
     recovery_start_resp: LoginStartResponse,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -152,7 +146,6 @@ struct OPRFRecoveryStartRespMessage {
 struct DPSSRefreshInitMessage {
     new_recovery_addresses: HashMap<PeerId, i32>,
     new_threshold: usize,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -166,7 +159,6 @@ struct DPSSRefreshReshareMessage {
     commitments: HashMap<Scalar, RistrettoPoint>,
     dealer_key: PublicKey,
     new_threshold: usize,
-    user_index: i32,
     user_id: PeerId,
     node_index: i32,
     node_id: PeerId,
@@ -285,7 +277,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_id: PeerId::random(),        // temp
         peer_id_to_index: HashMap::new(), // temp
         username: "".to_string(),         // temp
-        index: 0,
         opaque_keypair: Keypair::new(),
         libp2p_keypair_bytes: [0u8; 64],
         broadcast_topics: HashMap::new(),
@@ -357,16 +348,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         libp2p::identity::ed25519::Keypair::generate(),
         "".to_string(),
     )?;
-
-    // the bootstrap nodes aren't listening on this topic, need to run own nodes
-    /*let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
-    for peer in &BOOTNODES {
-        swarm
-            .behaviour_mut()
-            .kad
-            .add_address(&PeerId::from_str(peer)?, bootaddr.clone());
-    }
-    swarm.behaviour_mut().kad.bootstrap()?;*/
 
     fn handle_message(
         state_arc: Arc<Mutex<NodeState>>,
@@ -442,7 +423,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map(|(k, v)| (PeerId::from_str(k).unwrap(), v.clone()))
                     .collect(),
                 dealer_key: state.opaque_keypair.public_key,
-                user_index: state.index,
                 user_id: state.peer_id,
                 node_index: index.clone(),
                 node_id: address.clone(),
@@ -453,11 +433,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .gossipsub
                 .publish(topic.clone(), init_message);
             if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
+                println!("[INIT] Publish error: {e:?}");
             } else {
                 println!(
-                    "[INIT] Sending ACSS share messages for index {}",
-                    state.index
+                    "[INIT] Sending ACSS share messages for user {}",
+                    state.username
                 );
             }
         }
@@ -499,9 +479,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         let reg_start_resp_message = serde_json::to_vec(&OPRFRegStartRespMessage {
             reg_start_resp,
-            user_index: message.user_index,
-            user_id: message.user_id,
-            node_index: state.index,
+            user_id: message.user_id.clone(),
+            node_index: message.node_index,
             node_id: state.peer_id,
         })
         .unwrap();
@@ -510,9 +489,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .gossipsub
             .publish(topic.clone(), reg_start_resp_message)
         {
-            println!("Publish error: {e:?}");
+            println!("[REG INIT] Publish error: {e:?}");
         } else {
-            println!("[REG INIT] Published acknowledgement message");
+            println!(
+                "[REG INIT] Published acknowledgement message for user at peer ID {}",
+                message.user_id
+            );
         }
 
         Ok(())
@@ -545,7 +527,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let index = state.peer_id_to_index.get(&peer_id).unwrap().clone();
             let reg_finish_req_message = serde_json::to_vec(&OPRFRegFinishReqMessage {
                 reg_finish_req: reg_finish_req.clone(),
-                user_index: state.index,
                 user_id: state.peer_id,
                 node_index: index,
                 node_id: peer_id,
@@ -561,11 +542,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .gossipsub
                 .publish(topic.clone(), reg_finish_req_message);
             if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
+                println!("[REG START RESP] Publish error: {e:?}");
             } else {
                 println!(
-                    "[REG START RESP] Sending reg start finish messages {}",
-                    state.index
+                    "[REG START RESP] Sending reg start finish message for user {} at index {}",
+                    state.username, index
                 );
             }
         }
@@ -589,7 +570,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         file.write_all(serialized_envelopes.as_bytes())?;
 
         println!(
-            "[REG FINISH] Finished peer registration for {}",
+            "[REG FINISH] Finished peer registration for user at peer ID {}",
             message.user_id
         );
 
@@ -619,7 +600,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let login_start_req = serde_json::to_vec(&OPRFRecoveryStartReqMessage {
                 recovery_start_req: recovery_start_req.clone(),
                 other_indices: other_indices.clone(),
-                user_index: state.index,
                 user_id: state.peer_id,
                 node_index: index.clone(),
                 node_id: address.clone(),
@@ -630,9 +610,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .gossipsub
                 .publish(topic.clone(), login_start_req);
             if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
+                println!("[REC INIT] Publish error: {e:?}");
             } else {
-                println!("[REC INIT] Sending initial req for index {}", state.index);
+                println!(
+                    "[REC INIT] Sending initial req for user {} at index {}",
+                    state.username, index
+                );
             }
         }
 
@@ -652,9 +635,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         let rec_start_resp_message = serde_json::to_vec(&OPRFRecoveryStartRespMessage {
             recovery_start_resp: rec_start_resp,
-            user_index: message.user_index,
-            user_id: message.user_id,
-            node_index: state.index,
+            user_id: message.user_id.clone(),
+            node_index: message.node_index,
             node_id: state.peer_id,
         })
         .unwrap();
@@ -668,9 +650,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .gossipsub
             .publish(topic.clone(), rec_start_resp_message)
         {
-            println!("Publish error: {e:?}");
+            println!("[REC START REQ] Publish error: {e:?}");
         } else {
-            println!("[REC INIT] Published acknowledgement message");
+            println!(
+                "[REC START REQ] Published acknowledgement message for user at peer ID {}",
+                message.user_id
+            );
         }
 
         Ok(())
@@ -732,7 +717,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let init_message = serde_json::to_vec(&DPSSRefreshInitMessage {
                 new_recovery_addresses: new_recovery_addresses.clone(),
                 new_threshold,
-                user_index: state.index,
                 user_id: state.peer_id,
                 node_index: index.clone(),
                 node_id: address.clone(),
@@ -743,9 +727,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .gossipsub
                 .publish(topic.clone(), init_message);
             if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
+                println!("[DPSS INIT] Publish error: {e:?}");
             } else {
-                println!("[DPSS INIT] Sending init message");
+                println!(
+                    "[DPSS INIT] Sending init message for user {}",
+                    state.username
+                );
             }
         }
 
@@ -796,7 +783,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 dealer_key: state.opaque_keypair.private_key,
                 new_threshold: message.new_threshold,
                 commitments: old_commitments.clone(),
-                user_index: state.index,
                 user_id: state.peer_id,
                 node_index: index.clone(),
                 node_id: address.clone(),
@@ -807,11 +793,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .gossipsub
                 .publish(topic.clone(), reshare_msg);
             if let Err(e) = message_id {
-                println!("Publish error: {e:?}");
+                println!("[DPSS REFR INIT] Publish error: {e:?}");
             } else {
                 println!(
-                    "[DPSS INIT] Sending initial ACSS reshares for index {}",
-                    state.index
+                    "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at index {}",
+                    state.username, index
                 );
             }
         }
@@ -927,7 +913,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer: PeerId,
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
-        println!("Routing updated with peer: {:?}", peer);
+        println!("[LOCAL] Routing updated with peer: {:?}", peer);
         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
         let subscribe_handle = gossipsub::IdentTopic::new(format!("{peer}"));
         state
@@ -1067,8 +1053,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_state.peer_id = peer_id;
         node_state.opaque_node.id = node_state.username.clone();
         println!(
-            "Peer ID is {} + index is {}",
-            node_state.peer_id, node_state.index
+            "[LOCAL] Username: {} + peer ID: {}",
+            node_state.username, node_state.peer_id,
         );
         let libp2p_keypair =
             libp2p::identity::ed25519::Keypair::try_from_bytes(&mut libp2p_keypair_bytes.clone());
@@ -1379,7 +1365,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     update_peer_ids(state_arc.clone())?;
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
+                    println!("[LOCAL] Node peer ID: {address}");
                 }
                 _ => {}
             }
