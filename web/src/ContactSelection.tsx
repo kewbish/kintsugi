@@ -8,6 +8,7 @@ const ContactSelection = () => {
   const [peers, setPeers] = useState<string[]>([]);
   const [currentInput, setCurrentInput] = useState("");
   const [threshold, setThreshold] = useState(3);
+  const [confirmedThreshold, setConfirmedThreshold] = useState(threshold);
   const [hasLoaded, setHasLoaded] = useState(false);
 
   useEffect(() => {
@@ -27,7 +28,7 @@ const ContactSelection = () => {
       }
       invoke("local_refresh", {
         newRecoveryAddresses,
-        newThreshold: threshold - 1,
+        newThreshold: confirmedThreshold - 1,
       })
         .then((_) => {
           toast.success("Successfully updated!");
@@ -36,7 +37,7 @@ const ContactSelection = () => {
           toast.error(err);
         });
     }
-  }, [peers]);
+  }, [peers, confirmedThreshold]);
 
   return (
     <div
@@ -91,18 +92,23 @@ const ContactSelection = () => {
         </button>
       </div>
       <hr style={{ marginTop: "1em" }} />
-      <div style={{ display: "flex", marginTop: "1em" }}>
+      <div style={{ marginTop: "1em" }}>
         <label htmlFor="threshold">Threshold</label>
-        <input
-          type="number"
-          style={{ flexGrow: 1 }}
-          value={threshold}
-          onChange={(e) => setThreshold(Number(e.target.value))}
-          id="threshold"
-        />
-        <button style={{ marginRight: 0 }} onClick={changePeers}>
-          Update threshold
-        </button>
+        <div style={{ display: "flex" }}>
+          <input
+            type="number"
+            style={{ flexGrow: 1 }}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            id="threshold"
+          />
+          <button
+            style={{ marginRight: 0 }}
+            onClick={() => setConfirmedThreshold(threshold)}
+          >
+            Update threshold
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -13,7 +13,11 @@ function Register() {
   const [stepNum, setStepNum] = useState(0);
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
-  const [recoveryNodes, setRecoveryNodes] = useState([""]);
+  const [recoveryNodes, setRecoveryNodes] = useState([
+    "12D3KooWA8CKnRk9WdEaUT8FsrC1MxYr8fEQrZUoA8hTnRVfECdH",
+    "12D3KooWSXksTeMvRBVHM4UcQij6kgFYwXxdEaKy7rjgC4CDo9KL",
+    "12D3KooWKoGpAyu5WWxgU6Qn7VAEE4ui9mquMtfHcHhQbuubtP5y",
+  ]); // TODO
 
   const register = () => {
     let recoveryAddresses = new Map();

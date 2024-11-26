@@ -35,6 +35,13 @@ const router = createBrowserRouter([
       <Recovery />
     ),
   },
+  {
+    path: "/contacts",
+    element: (
+      // TODO - readd auth
+      <ContactSelection />
+    ),
+  },
 ]);
 
 createRoot(document.getElementById("root")!).render(

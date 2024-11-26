@@ -20,3 +20,5 @@ serde_with = { version = "3.11.0", features = ["macros"] }
 sha3 = "0.10.8"
 tauri = { version = "2.0.6", features = ["devtools"] }
 tokio = { version = "1.40.0", features = ["macros", "io-std", "sync"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
