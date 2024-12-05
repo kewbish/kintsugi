@@ -1039,14 +1039,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    #[tauri::command]
-    fn local_register(
-        state: State<TauriState>,
+    fn save_local_envelope(
         username: String,
         password: String,
-        recovery_addresses: HashMap<String, i32>,
+        opaque_keypair: Keypair,
+        libp2p_keypair_bytes: [u8; 64],
+        peer_id: PeerId,
     ) -> Result<(), String> {
-        let mut node_state = state.0.lock().unwrap();
         let file_path = format!("tmp/{username}_login.envelope");
         if Path::new(&file_path).exists() {
             return Err("Encrypted envelope already exists".to_string());
@@ -1058,16 +1057,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = file {
             return Err(e.to_string());
         }
-        node_state.username = username.clone();
-        node_state.opaque_keypair = Keypair::new();
-        let libp2p_keypair = libp2p::identity::ed25519::Keypair::generate();
         let envelope = LocalEnvelope {
-            keypair: node_state.opaque_keypair.clone(),
-            libp2p_keypair_bytes: libp2p_keypair.to_bytes(),
+            keypair: opaque_keypair.clone(),
+            libp2p_keypair_bytes,
             peer_public_key: (Scalar::ZERO * RISTRETTO_BASEPOINT_POINT)
                 .compress()
                 .to_bytes(),
-            peer_id: node_state.peer_id.to_string(),
+            peer_id: peer_id.to_string(),
             username,
         };
         let encrypted_envelope = envelope.clone().encrypt_w_password(password.clone());
@@ -1084,6 +1080,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(e) = result {
             return Err(e.to_string());
         }
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn tauri_save_local_envelope(state: State<TauriState>, password: String) -> Result<(), String> {
+        let node_state = state.0.lock().unwrap();
+        save_local_envelope(
+            node_state.username.clone(),
+            password,
+            node_state.opaque_keypair.clone(),
+            node_state.libp2p_keypair_bytes,
+            node_state.peer_id,
+        )
+    }
+
+    #[tauri::command]
+    fn local_register(
+        state: State<TauriState>,
+        username: String,
+        password: String,
+        recovery_addresses: HashMap<String, i32>,
+    ) -> Result<(), String> {
+        let mut node_state = state.0.lock().unwrap();
+        node_state.username = username.clone();
+        node_state.opaque_keypair = Keypair::new();
+        let libp2p_keypair = libp2p::identity::ed25519::Keypair::generate();
+        save_local_envelope(
+            username.clone(),
+            password.clone(),
+            node_state.opaque_keypair.clone(),
+            libp2p_keypair.to_bytes(),
+            node_state.peer_id,
+        )?;
+
         let tx_clone = state.1.clone();
         let keypair = libp2p_keypair.clone();
         let username = node_state.username.clone();
@@ -1379,7 +1409,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 get_peers,
                 set_username,
                 local_recovery,
-                local_refresh
+                local_refresh,
+                tauri_save_local_envelope
             ])
             .manage(TauriState(Arc::clone(&state_arc), tx))
             .setup(move |app| {

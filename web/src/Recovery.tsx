@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import Skeleton from "react-loading-skeleton";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useDebounce } from "use-debounce";
 import CopyableCodeblock from "./components/CopyableCodeblock";
 import User from "./components/User";
+import { AuthContext } from "./components/AuthContext";
 
 const Recovery = () => {
   const navigate = useNavigate();
@@ -24,7 +25,9 @@ const Recovery = () => {
       .catch((err) => toast.error(err));
   }, []);
 
-  const startRecovery = () => {
+  const { setIsLoggedIn } = useContext(AuthContext);
+
+  const startRecovery = async () => {
     let recoveryNodes = new Map();
     let count = 1;
     for (const i in peers) {
@@ -34,9 +37,14 @@ const Recovery = () => {
       }
     }
     invoke("local_recovery", { username, password, recoveryNodes })
-      .then((resp) => {
-        toast.success("Successfully recovered keypair");
-        navigate("/");
+      .then(() => {
+        invoke("tauri_save_local_envelope", { password })
+          .then(() => {
+            setIsLoggedIn(true); // if recovery was successful, can simply log in
+            toast.success("Successfully recovered keypair");
+            navigate("/");
+          })
+          .catch((err) => toast.error(err));
       })
       .catch((err) => toast.error(err));
   };
