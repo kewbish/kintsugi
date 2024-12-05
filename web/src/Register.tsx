@@ -17,7 +17,7 @@ function Register() {
     "12D3KooWA8CKnRk9WdEaUT8FsrC1MxYr8fEQrZUoA8hTnRVfECdH",
     "12D3KooWSXksTeMvRBVHM4UcQij6kgFYwXxdEaKy7rjgC4CDo9KL",
     "12D3KooWKoGpAyu5WWxgU6Qn7VAEE4ui9mquMtfHcHhQbuubtP5y",
-  ]); // TODO
+  ]);
 
   const register = () => {
     let recoveryAddresses = new Map();
@@ -54,8 +54,53 @@ function Register() {
     >
       <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>
       {stepNum === 0 ? (
+        <>
+          <p>Enter a username and a password to register.</p>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "1em",
+            }}
+          >
+            <div>
+              <form
+                action=""
+                style={{ display: "flex", flexFlow: "column nowrap" }}
+              >
+                <label htmlFor="username">Username</label>
+                <input
+                  type="text"
+                  id="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
+                <label htmlFor="password">Password</label>
+                <input
+                  type="password"
+                  id="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </form>
+            </div>
+            <div>
+              <button
+                style={{ float: "right", marginRight: 0 }}
+                onClick={() => setStepNum(1)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
+      {stepNum === 1 ? (
         <div>
-          <p>Enter the addresses of three or more trusted recovery nodes.</p>
+          <a style={{ cursor: "pointer" }} onClick={() => setStepNum(0)}>
+            &lt; back
+          </a>
+          <p>Enter the addresses of three or more trusted recovery nodes. </p>
           <div
             style={{
               display: "flex",
@@ -134,62 +179,16 @@ function Register() {
                   recoveryNodes.length < 3 ||
                   new Set(recoveryNodes).size < recoveryNodes.length
                 }
-                onClick={() => setStepNum(1)}
-              >
-                Next
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {stepNum === 1 ? (
-        <>
-          <a style={{ cursor: "pointer" }} onClick={() => setStepNum(0)}>
-            &lt; back
-          </a>
-          <p>Enter a username and a password.</p>
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "1em",
-            }}
-          >
-            <div>
-              <form
-                action=""
-                style={{ display: "flex", flexFlow: "column nowrap" }}
-              >
-                <label htmlFor="username">Username</label>
-                <input
-                  type="text"
-                  id="username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                />
-                <label htmlFor="password">Password</label>
-                <input
-                  type="password"
-                  id="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </form>
-            </div>
-            <div>
-              <button
-                style={{ float: "right", marginRight: 0 }}
                 onClick={() => register()}
               >
                 Register
               </button>
             </div>
           </div>
-        </>
+        </div>
       ) : null}
       <p style={{ textAlign: "center" }}>
-        <Link to="/register">Register</Link> ∘{" "}
-        <Link to="/recovery">Recover</Link>
+        <Link to="/login">Login</Link> ∘ <Link to="/recovery">Recover</Link>
       </p>
     </div>
   );
