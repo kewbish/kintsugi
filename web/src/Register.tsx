@@ -18,13 +18,19 @@ function Register() {
     "12D3KooWSXksTeMvRBVHM4UcQij6kgFYwXxdEaKy7rjgC4CDo9KL",
     "12D3KooWKoGpAyu5WWxgU6Qn7VAEE4ui9mquMtfHcHhQbuubtP5y",
   ]);
+  const [threshold, setThreshold] = useState(3);
 
   const register = () => {
     let recoveryAddresses = new Map();
     for (const [i, address] of recoveryNodes.entries()) {
       recoveryAddresses.set(address, i + 1);
     }
-    invoke("local_register", { username, password, recoveryAddresses })
+    invoke("local_register", {
+      username,
+      password,
+      recoveryAddresses,
+      threshold,
+    })
       .then((_) => {
         setIsLoggedIn(true);
         toast.success("Successfully registered!");
@@ -49,7 +55,7 @@ function Register() {
         flexDirection: "column",
         justifyContent: "center",
         height: "100%",
-        marginTop: "-5em",
+        marginTop: "-3em",
       }}
     >
       <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>
@@ -156,10 +162,23 @@ function Register() {
                 </div>
               ))}
             </div>
+            <div>
+              <label htmlFor="threshold">Threshold</label>
+              <div style={{ display: "flex" }}>
+                <input
+                  type="number"
+                  style={{ flexGrow: 1 }}
+                  value={threshold}
+                  onChange={(e) => setThreshold(Number(e.target.value))}
+                  id="threshold"
+                />
+              </div>
+            </div>
             <div
               style={{
                 display: "flex",
                 justifyContent: "flex-end",
+                marginTop: "1em",
               }}
             >
               <button
@@ -173,11 +192,14 @@ function Register() {
                     ? "Add three or more recovery nodes to continue."
                     : new Set(recoveryNodes).size < recoveryNodes.length
                     ? "Recovery nodes must be unique"
+                    : threshold < 3
+                    ? "Threshold must be at least 3."
                     : undefined
                 }
                 disabled={
                   recoveryNodes.length < 3 ||
-                  new Set(recoveryNodes).size < recoveryNodes.length
+                  new Set(recoveryNodes).size < recoveryNodes.length ||
+                  threshold < 3
                 }
                 onClick={() => register()}
               >

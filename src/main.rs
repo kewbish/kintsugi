@@ -186,6 +186,7 @@ enum TauriToRustCommand {
         String,
         String,
         HashMap<PeerId, i32>,
+        usize,
     ),
     RecoveryStart(String, String, HashMap<PeerId, i32>),
     RefreshStart(HashMap<PeerId, i32>, i32),
@@ -411,14 +412,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         password: String,
         recovery_addresses: HashMap<PeerId, i32>,
+        threshold: usize,
     ) -> Result<NodeState, Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
+
+        state.acss_inputs.degree = threshold - 1;
 
         let s = Scalar::random(&mut OsRng);
         let (acss_dealer_share, phi, phi_hat) = ACSS::share_dealer(
             state.acss_inputs.clone(),
             s,
-            state.acss_inputs.degree,
+            threshold - 1,
             state.opaque_keypair.private_key,
         )?;
         state.phi_polynomials = Some((phi, phi_hat));
@@ -426,6 +430,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let reg_start_req = state.opaque_node.local_registration_start(password)?;
 
+        state.threshold = threshold;
         for (address, index) in recovery_addresses.iter() {
             state
                 .peer_id_to_index
@@ -791,14 +796,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (acss_dealer_share_s, _, _) = ACSS::share_dealer(
             state.acss_inputs.clone(),
             node_share.s_i_d,
-            message.new_recovery_addresses.len() - 1,
+            message.new_threshold - 1,
             state.opaque_keypair.private_key,
         )?;
 
         let (acss_dealer_share_s_hat, _, _) = ACSS::share_dealer(
             state.acss_inputs.clone(),
             node_share.s_hat_i_d,
-            message.new_recovery_addresses.len() - 1,
+            message.new_threshold - 1,
             state.opaque_keypair.private_key,
         )?;
 
@@ -1107,6 +1112,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         username: String,
         password: String,
         recovery_addresses: HashMap<String, i32>,
+        threshold: usize,
     ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
         node_state.username = username.clone();
@@ -1135,6 +1141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     username,
                     password_clone,
                     recovery_nodes,
+                    threshold,
                 ))
                 .await
                 .unwrap();
@@ -1434,10 +1441,10 @@ Some(res) = rx.recv() => match res {
         swarm = new_swarm(keypair, username).unwrap();
         resubscribe_topics(&mut swarm, state_arc.clone()).unwrap();
     }
-    TauriToRustCommand::RegStart(keypair, username, password, recovery_nodes) => {
+    TauriToRustCommand::RegStart(keypair, username, password, recovery_nodes, threshold) => {
         swarm = new_swarm(keypair, username).unwrap();
         resubscribe_topics(&mut swarm, state_arc.clone()).unwrap();
-        handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes).unwrap();
+        handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes, threshold).unwrap();
     }
     TauriToRustCommand::RecoveryStart(username, password, recovery_nodes) => {
         handle_recovery_init(state_arc.clone(), &mut swarm, username, password, recovery_nodes).unwrap();
