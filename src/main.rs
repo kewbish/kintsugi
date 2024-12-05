@@ -1039,6 +1039,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    #[tauri::command]
+    fn get_threshold(state: State<TauriState>) -> i32 {
+        let node_state = state.0.lock().unwrap();
+        node_state.threshold.try_into().unwrap()
+    }
+
     fn save_local_envelope(
         username: String,
         password: String,
@@ -1407,6 +1413,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 read_notepad,
                 save_notepad,
                 get_peers,
+                get_threshold,
                 set_username,
                 local_recovery,
                 local_refresh,

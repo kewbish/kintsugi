@@ -18,6 +18,10 @@ const ContactSelection = () => {
         setHasLoaded(true);
       })
       .catch((err) => toast.error(err));
+
+    invoke("get_threshold")
+      .then((resp) => setThreshold(resp as number))
+      .catch((err) => toast.error(err));
   }, []);
 
   useEffect(() => {
