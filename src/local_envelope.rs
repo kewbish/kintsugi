@@ -1,4 +1,4 @@
-use crate::keypair::{Keypair, PublicKey};
+use crate::keypair::Keypair;
 use crate::opaque::P2POpaqueError;
 
 #[allow(unused_imports)]
@@ -9,17 +9,11 @@ use chacha20poly1305::{
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256};
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct LocalEnvelope {
     pub(crate) keypair: Keypair,
-    #[serde_as(as = "Bytes")]
-    pub(crate) libp2p_keypair_bytes: [u8; 64],
-    pub(crate) peer_public_key: PublicKey,
-    pub(crate) peer_id: String,
     pub(crate) username: String,
 }
 

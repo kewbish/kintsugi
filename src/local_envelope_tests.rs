@@ -7,13 +7,9 @@ mod local_encdec_test {
         let password = "password".to_string();
         let keypair = Keypair::new();
         let peer_id = "Alice".to_string();
-        let peer_keypair = Keypair::new();
         let envelope = LocalEnvelope {
             keypair,
             username: peer_id.clone(),
-            libp2p_keypair_bytes: libp2p::identity::ed25519::Keypair::generate().to_bytes(),
-            peer_id,
-            peer_public_key: peer_keypair.public_key,
         };
 
         let encrypted_envelope = envelope.clone().encrypt_w_password(password).unwrap();
@@ -27,7 +23,5 @@ mod local_encdec_test {
             .decrypt_w_password("password".to_string())
             .unwrap();
         assert_eq!(decrypted_envelope.keypair, envelope.keypair);
-        assert_eq!(decrypted_envelope.peer_public_key, envelope.peer_public_key);
-        assert_eq!(decrypted_envelope.peer_id, envelope.peer_id);
     }
 }

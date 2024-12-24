@@ -11,7 +11,7 @@ mod opaque_test {
         let mut node_3 = P2POpaqueNode::new("Charlie".to_string());
 
         let reg_start_req = node_1.local_registration_start("password".to_string())?;
-        assert_eq!(reg_start_req.peer_id, "Alice".to_string());
+        assert_eq!(reg_start_req.user_username, "Alice".to_string());
         assert_eq!(reg_start_req.peer_public_key, node_1.keypair.public_key);
 
         let reg_start_resp_node_2 =
@@ -29,7 +29,6 @@ mod opaque_test {
         );
 
         let reg_finish_req = node_1.local_registration_finish(
-            [0u8; 64],
             Vec::from([reg_start_resp_node_2, reg_start_resp_node_3]),
             1,
         )?;
@@ -44,7 +43,7 @@ mod opaque_test {
         assert!(node_3.envelopes.contains_key("Alice"));
 
         let login_start_req = node_1.local_login_start("password".to_string())?;
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+        assert_eq!(login_start_req.user_username, "Alice".to_string());
 
         let login_start_resp_node_2 =
             node_2.peer_login_start(login_start_req.clone(), 2, HashSet::from([1, 2, 3]))?;
@@ -60,7 +59,7 @@ mod opaque_test {
             node_3.keypair.public_key
         );
 
-        let (keypair, _) = node_1.local_login_finish(Vec::from([
+        let keypair = node_1.local_login_finish(Vec::from([
             login_start_resp_node_2,
             login_start_resp_node_3,
         ]))?;
@@ -76,14 +75,13 @@ mod opaque_test {
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
 
         let reg_start_req = node_1.local_registration_start("password".to_string())?;
-        assert_eq!(reg_start_req.peer_id, "Alice".to_string());
+        assert_eq!(reg_start_req.user_username, "Alice".to_string());
 
         let reg_start_resp =
             node_2.peer_registration_start(reg_start_req, 2, HashSet::from([1, 2, 3]))?;
         assert_eq!(reg_start_resp.peer_public_key, node_2.keypair.public_key);
 
-        let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
+        let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]), 0)?;
         assert_eq!(
             reg_finish_req.get(0).unwrap().peer_public_key,
             node_1.keypair.public_key
@@ -96,7 +94,7 @@ mod opaque_test {
         // wrong password during start
 
         let login_start_req = node_1.local_login_start("password2".to_string())?;
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+        assert_eq!(login_start_req.user_username, "Alice".to_string());
 
         let login_start_resp =
             node_2.peer_login_start(login_start_req.clone(), 2, HashSet::from([1, 2, 3]))?;
@@ -112,7 +110,7 @@ mod opaque_test {
         // another wrong password
 
         let login_start_req = node_1.local_login_start("password2".to_string())?;
-        assert_eq!(login_start_req.peer_id, "Alice".to_string());
+        assert_eq!(login_start_req.user_username, "Alice".to_string());
 
         let login_start_resp =
             node_2.peer_login_start(login_start_req.clone(), 2, HashSet::from([1, 2, 3]))?;
@@ -149,7 +147,7 @@ mod opaque_test {
         reg_start_resp = simulate_serde(reg_start_resp);
 
         let mut reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
+            node_1.local_registration_finish(Vec::from([reg_start_resp]), 0)?;
         reg_finish_req = simulate_serde(reg_finish_req);
 
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
@@ -161,7 +159,7 @@ mod opaque_test {
             node_2.peer_login_start(login_start_req, 2, HashSet::from([1, 2]))?;
         login_start_resp = simulate_serde(login_start_resp);
 
-        let (mut keypair, _) = node_1.local_login_finish(Vec::from([login_start_resp]))?;
+        let mut keypair = node_1.local_login_finish(Vec::from([login_start_resp]))?;
         keypair = simulate_serde(keypair);
         assert_eq!(keypair.public_key, node_1.keypair.public_key);
         assert_eq!(keypair.private_key, node_1.keypair.private_key);
@@ -188,8 +186,7 @@ mod opaque_test {
             node_2.peer_registration_start(reg_start_req, 2, HashSet::from([1, 2]))?;
 
         node_1 = simulate_serde(node_1);
-        let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
+        let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]), 0)?;
 
         node_2 = simulate_serde(node_2);
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
@@ -202,7 +199,7 @@ mod opaque_test {
             node_2.peer_login_start(login_start_req, 2, HashSet::from([1, 2]))?;
 
         node_1 = simulate_serde(node_1);
-        let (keypair, _) = node_1.local_login_finish(Vec::from([login_start_resp]))?;
+        let keypair = node_1.local_login_finish(Vec::from([login_start_resp]))?;
         assert_eq!(keypair.public_key, node_1.keypair.public_key);
         assert_eq!(keypair.private_key, node_1.keypair.private_key);
 
@@ -219,8 +216,7 @@ mod opaque_test {
         let reg_start_resp =
             node_2.peer_registration_start(reg_start_req, 2, HashSet::from([1, 2]))?;
 
-        let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
+        let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]), 0)?;
 
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
 
@@ -235,7 +231,7 @@ mod opaque_test {
         );
 
         let mut login_start_req_2 = node_2.local_login_start("password".to_string())?;
-        login_start_req_2.peer_id = "David".to_string();
+        login_start_req_2.user_username = "David".to_string();
         assert_eq!(
             node_2
                 .peer_login_start(login_start_req, 2, HashSet::from([1, 2]))
@@ -260,13 +256,12 @@ mod opaque_test {
         assert_eq!(
             node_3
                 .clone()
-                .local_registration_finish([0u8; 64], Vec::from([reg_start_resp.clone()]), 0)
+                .local_registration_finish(Vec::from([reg_start_resp.clone()]), 0)
                 .unwrap_err(),
             P2POpaqueError::CryptoError("OPRF client not initialized".to_string())
         );
 
-        let reg_finish_req =
-            node_1.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
+        let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]), 0)?;
 
         node_2.peer_registration_finish(reg_finish_req.get(0).unwrap().clone())?;
 
@@ -301,8 +296,8 @@ mod opaque_test {
 
         // finish registration with node 1's response, forge their peer ID and public key
         let mut malicious_reg_finish_req =
-            node_3.local_registration_finish([0u8; 64], Vec::from([reg_start_resp]), 0)?;
-        malicious_reg_finish_req.get_mut(0).unwrap().peer_id = "Alice".to_string();
+            node_3.local_registration_finish(Vec::from([reg_start_resp]), 0)?;
+        malicious_reg_finish_req.get_mut(0).unwrap().user_username = "Alice".to_string();
         malicious_reg_finish_req.get_mut(0).unwrap().peer_public_key = node_1.keypair.public_key;
         malicious_reg_finish_req.get_mut(0).unwrap().nonce = [1u8; 12];
         malicious_reg_finish_req

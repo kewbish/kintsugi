@@ -1,9 +1,10 @@
 // NOTE: this DKG is no longer being used
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use std::collections::{HashMap, HashSet};
 
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
+use itertools::Itertools;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
