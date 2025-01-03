@@ -23,21 +23,17 @@ use curve25519_dalek::{RistrettoPoint, Scalar};
 use dpss::DPSS;
 use futures::prelude::*;
 use keypair::{Keypair, PublicKey};
+use libp2p::kad::QueryResult;
+use libp2p::kad::{
+    store::{MemoryStore, RecordStore},
+    GetRecordOk, PeerRecord,
+};
 use libp2p::{
-    gossipsub, identify,
+    identify,
     kad::{self, InboundRequest, QueryId},
-    mdns, PeerId, StreamProtocol, Swarm,
-};
-use libp2p::{
-    gossipsub::TopicHash,
-    kad::{
-        store::{MemoryStore, RecordStore},
-        GetRecordOk, PeerRecord,
-    },
-};
-use libp2p::{
-    gossipsub::{IdentTopic, Message},
-    kad::QueryResult,
+    mdns,
+    request_response::{self, ProtocolSupport, ResponseChannel},
+    Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use libp2p::{
     kad::{Record, RecordKey},
@@ -64,9 +60,8 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tauri::{Manager, State};
-use tokio::{io, select, sync::mpsc};
+use tokio::{select, sync::mpsc};
 use util::i32_to_scalar;
 
 // --- state structs --- //
@@ -78,19 +73,19 @@ struct NodeState {
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
     threshold: usize,
-    peer_id_to_username: HashMap<PeerId, String>,
+    username_to_peer_id: HashMap<String, PeerId>,
     username_to_index: HashMap<String, i32>, // this node's recovery nodes' indices
     username_to_opaque_pkey: HashMap<String, PublicKey>,
-    point_to_point_topics: HashMap<String, IdentTopic>,
     acss_inputs: ACSSInputs,
     opaque_node: P2POpaqueNode,
-    peer_recoveries: HashMap<String, (ACSSNodeShare, i32)>, // the indices for nodes for which this node
-    // is a recovery node
+    // the indices for nodes for which this node is a recovery node
+    peer_recoveries: HashMap<String, (ACSSNodeShare, i32)>,
     phi_polynomials: Option<(Polynomial, Polynomial)>,
     registration_received: Option<HashMap<String, RegStartResponse>>,
     recovery_received: Option<HashMap<String, LoginStartResponse>>,
     reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare)>>,
     kad_filtering: HashMap<QueryId, Record>,
+    waiting_for_peer_id: HashMap<String, Vec<RequestMessage>>,
 }
 
 #[serde_as]
@@ -104,7 +99,7 @@ struct BootstrapNodeState {
 
 // --- message structs --- //
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRegInitMessage {
     inputs: ACSSInputs,
     reg_start_req: RegStartRequest,
@@ -115,7 +110,7 @@ struct OPRFRegInitMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRegStartRespMessage {
     reg_start_resp: RegStartResponse,
     user_username: String,
@@ -123,7 +118,7 @@ struct OPRFRegStartRespMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRegFinishReqMessage {
     reg_finish_req: RegFinishRequest,
     user_username: String,
@@ -131,7 +126,7 @@ struct OPRFRegFinishReqMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRecoveryStartReqMessage {
     recovery_start_req: LoginStartRequest,
     other_indices: HashSet<i32>,
@@ -140,7 +135,7 @@ struct OPRFRecoveryStartReqMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRecoveryStartRespMessage {
     recovery_start_resp: LoginStartResponse,
     user_username: String,
@@ -148,7 +143,7 @@ struct OPRFRecoveryStartRespMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct DPSSRefreshInitMessage {
     new_recovery_addresses: HashMap<String, i32>,
     new_threshold: usize,
@@ -157,7 +152,7 @@ struct DPSSRefreshInitMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct DPSSRefreshReshareMessage {
     inputs: ACSSInputs,
     dealer_shares: HashMap<String, ACSSDealerShare>,
@@ -170,23 +165,27 @@ struct DPSSRefreshReshareMessage {
     node_username: String,
 }
 
-#[derive(Serialize, Deserialize)]
-enum BroadcastMessage {
+#[derive(Serialize, Deserialize, Clone, Debug)]
+enum RequestMessage {
     OPRFRegInitMessage(OPRFRegInitMessage),
-    OPRFRegStartRespMessage(OPRFRegStartRespMessage),
     OPRFRegFinishReqMessage(OPRFRegFinishReqMessage),
     OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage),
-    OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage),
     DPSSRefreshInitMessage(DPSSRefreshInitMessage),
     DPSSRefreshReshareMessage(DPSSRefreshReshareMessage),
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+enum ResponseMessage {
+    OPRFRegStartRespMessage(OPRFRegStartRespMessage),
+    OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage),
+}
+
 #[derive(NetworkBehaviour)]
 struct P2PBehaviour {
-    gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
     identify: identify::Behaviour,
     mdns: mdns::tokio::Behaviour,
+    request_response: request_response::json::Behaviour<RequestMessage, ResponseMessage>,
 }
 
 enum TauriToRustCommand {
@@ -251,7 +250,7 @@ impl KadRecord {
 enum KadRecordType {
     Pk(PublicKey),
     RecvAddr(HashMap<String, i32>, usize),
-    PeerId,
+    PeerId(PeerId),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -274,29 +273,6 @@ fn new_swarm(
             libp2p::yamux::Config::default,
         )?
         .with_behaviour(|key| {
-            let message_id_fn = |message: &gossipsub::Message| {
-                let mut hasher = Sha3_256::new();
-                hasher.update(message.data.clone());
-                hasher.update(message.source.unwrap().to_bytes());
-                let message_hash = hasher.finalize();
-                gossipsub::MessageId::from(format!("{:X}", message_hash))
-            };
-
-            let gossipsub_config = gossipsub::ConfigBuilder::default()
-                .heartbeat_interval(Duration::from_secs(10))
-                .validation_mode(gossipsub::ValidationMode::Strict)
-                .mesh_outbound_min(0)
-                .mesh_n_low(0)
-                .mesh_n(1)
-                .message_id_fn(message_id_fn)
-                .build()
-                .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?;
-
-            let gossipsub = gossipsub::Behaviour::new(
-                gossipsub::MessageAuthenticity::Signed(key.clone()),
-                gossipsub_config,
-            )?;
-
             let mut kad_config = kad::Config::new(StreamProtocol::new("/kintsugi/kad/1.0.0"));
             kad_config.set_record_filtering(kad::StoreInserts::FilterBoth);
             let kad = kad::Behaviour::with_config(
@@ -313,11 +289,19 @@ fn new_swarm(
             let mdns =
                 mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
 
+            let request_response = request_response::json::Behaviour::new(
+                [(
+                    StreamProtocol::new("/kintsugi/1.0.0"),
+                    ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
             Ok(P2PBehaviour {
-                gossipsub,
                 kad,
                 identify,
                 mdns,
+                request_response,
             })
         })?
         .with_swarm_config(|cfg| {
@@ -340,11 +324,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_id: PeerId::random(),         // temp
         username_to_index: HashMap::new(), // temp
         username: "".to_string(),          // temp
-        peer_id_to_username: HashMap::new(),
+        username_to_peer_id: HashMap::new(),
         username_to_opaque_pkey: HashMap::new(),
         opaque_keypair: Keypair::new(),
         libp2p_keypair_bytes: [0u8; 64],
-        point_to_point_topics: HashMap::new(),
         acss_inputs: ACSSInputs {
             h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
             degree: 1,
@@ -358,6 +341,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         reshare_received: None,
         threshold: 1, // temp
         kad_filtering: HashMap::new(),
+        waiting_for_peer_id: HashMap::new(),
     };
     let mut is_bootstrap = false;
     let mut bootstrap_keypair: libp2p::identity::ed25519::Keypair =
@@ -427,44 +411,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut swarm = new_swarm(bootstrap_keypair, bootstrap_username)?;
 
-    fn handle_message(
+    fn handle_request(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         peer_id: PeerId,
-        message: Message,
+        request: RequestMessage,
+        channel: ResponseChannel<ResponseMessage>,
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
-        if let Some(s) = message.source {
-            if s == state.peer_id {
-                return Ok(());
-            }
-        }
-        let message_data: BroadcastMessage =
-            serde_json::from_slice(message.data.as_slice()).unwrap();
 
-        match message_data {
-            BroadcastMessage::OPRFRegInitMessage(msg) => {
-                handle_message_reg_init(&mut state, swarm, peer_id, msg)
+        match request {
+            RequestMessage::OPRFRegInitMessage(msg) => {
+                handle_message_reg_init(&mut state, swarm, peer_id, msg, channel)
             }
-            BroadcastMessage::OPRFRegStartRespMessage(msg) => {
-                handle_message_reg_start_resp(&mut state, swarm, peer_id, msg)
-            }
-            BroadcastMessage::OPRFRegFinishReqMessage(msg) => {
+            RequestMessage::OPRFRegFinishReqMessage(msg) => {
                 handle_message_reg_finish_req(&mut state, swarm, peer_id, msg)?;
                 update_recovery_addrs(state_arc.clone(), swarm)
             }
-            BroadcastMessage::OPRFRecoveryStartReqMessage(msg) => {
-                handle_message_rec_start_req(&mut state, swarm, peer_id, msg)
+            RequestMessage::OPRFRecoveryStartReqMessage(msg) => {
+                handle_message_rec_start_req(&mut state, swarm, peer_id, msg, channel)
             }
-            BroadcastMessage::OPRFRecoveryStartRespMessage(msg) => {
-                handle_message_rec_start_resp(&mut state, swarm, peer_id, msg)
-            }
-            BroadcastMessage::DPSSRefreshInitMessage(msg) => {
+            RequestMessage::DPSSRefreshInitMessage(msg) => {
                 handle_message_dpss_init(&mut state, swarm, peer_id, msg)
             }
-            BroadcastMessage::DPSSRefreshReshareMessage(msg) => {
+            RequestMessage::DPSSRefreshReshareMessage(msg) => {
                 handle_message_dpss_reshare(&mut state, swarm, peer_id, msg)?;
                 update_recovery_addrs(state_arc.clone(), swarm)
+            }
+        }
+    }
+
+    fn handle_response(
+        state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer_id: PeerId,
+        response: ResponseMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
+
+        match response {
+            ResponseMessage::OPRFRegStartRespMessage(msg) => {
+                handle_message_reg_start_resp(&mut state, swarm, peer_id, msg)
+            }
+            ResponseMessage::OPRFRecoveryStartRespMessage(msg) => {
+                handle_message_rec_start_resp(&mut state, swarm, peer_id, msg)
             }
         }
     }
@@ -483,8 +473,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("[DEBUG] Updating username to {:?}", username.clone());
 
             let (_peer_id_kad_record, peer_id_record) = KadRecord::new(
-                RecordKey::new(&format!("/peer_id/{}", state.peer_id)),
-                KadRecordType::PeerId,
+                RecordKey::new(&format!("/peer_id/{}", state.username)),
+                KadRecordType::PeerId(state.peer_id),
                 username.clone(),
                 state.peer_id,
                 state.opaque_keypair.clone(),
@@ -557,6 +547,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
+    fn send_request_msg(
+        swarm: &mut Swarm<P2PBehaviour>,
+        state: &mut NodeState,
+        username: String,
+        msg: RequestMessage,
+    ) {
+        let destination_peer_id = state.username_to_peer_id.get(&username);
+        match destination_peer_id {
+            Some(peer) => {
+                swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_request(peer, msg);
+            }
+            None => {
+                if state.waiting_for_peer_id.contains_key(&username) {
+                    state
+                        .waiting_for_peer_id
+                        .get_mut(&username)
+                        .unwrap()
+                        .push(msg);
+                } else {
+                    state.waiting_for_peer_id.insert(username, Vec::from([msg]));
+                }
+            }
+        }
+    }
+
     fn handle_reg_init(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
@@ -581,45 +599,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let reg_start_req = state.opaque_node.local_registration_start(password)?;
 
         state.threshold = threshold;
-        for (address, index) in recovery_addresses.iter() {
+        for (username, index) in recovery_addresses.iter() {
             state
                 .username_to_index
-                .insert(address.clone(), index.clone());
-            println!("[DEBUG] {:?} {:?}", state.point_to_point_topics, address);
-            let topic = state.point_to_point_topics.get(address).unwrap().clone();
+                .insert(username.clone(), index.clone());
 
-            let subscribed: HashSet<TopicHash> = swarm
-                .behaviour_mut()
-                .gossipsub
-                .topics()
-                .map(|x| x.clone())
-                .collect();
-            let connected_peers: HashSet<&PeerId> = swarm.connected_peers().collect();
-            println!("[DEBUG] {:?} {:?} {:?}", topic, subscribed, connected_peers);
+            let init_message = RequestMessage::OPRFRegInitMessage(OPRFRegInitMessage {
+                inputs: state.acss_inputs.clone(),
+                reg_start_req: reg_start_req.clone(),
+                dealer_shares: acss_dealer_share.clone(),
+                dealer_key: state.opaque_keypair.public_key,
+                user_username: state.username.clone(),
+                node_index: index.clone(),
+                node_username: username.clone(),
+            });
 
-            let init_message =
-                serde_json::to_vec(&BroadcastMessage::OPRFRegInitMessage(OPRFRegInitMessage {
-                    inputs: state.acss_inputs.clone(),
-                    reg_start_req: reg_start_req.clone(),
-                    dealer_shares: acss_dealer_share.clone(),
-                    dealer_key: state.opaque_keypair.public_key,
-                    user_username: state.username.clone(),
-                    node_index: index.clone(),
-                    node_username: address.clone(),
-                }))
-                .unwrap();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), init_message);
-            if let Err(e) = message_id {
-                println!("[INIT] Publish error: {e:?}");
-            } else {
-                println!(
-                    "[INIT] Sending ACSS share messages for user {}",
-                    state.username
-                );
-            }
+            send_request_msg(swarm, &mut state, username.clone(), init_message);
+            println!(
+                "[INIT] Sending ACSS share messages for user {}",
+                state.username
+            );
         }
 
         std::mem::drop(state);
@@ -634,6 +633,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         _peer_id: PeerId,
         message: OPRFRegInitMessage,
+        channel: ResponseChannel<ResponseMessage>,
     ) -> Result<(), Box<dyn Error>> {
         let node_share = ACSS::share(
             message.inputs.clone(),
@@ -651,11 +651,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             (node_share.clone(), message.node_index),
         );
 
-        let topic = state
-            .point_to_point_topics
-            .get(&message.user_username)
-            .unwrap()
-            .clone();
         let other_indices = message
             .dealer_shares
             .values()
@@ -666,19 +661,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             message.node_index,
             other_indices,
         )?;
-        let reg_start_resp_message = serde_json::to_vec(
-            &BroadcastMessage::OPRFRegStartRespMessage(OPRFRegStartRespMessage {
+        let reg_start_resp_message =
+            ResponseMessage::OPRFRegStartRespMessage(OPRFRegStartRespMessage {
                 reg_start_resp,
                 user_username: message.user_username.clone(),
                 node_index: message.node_index,
                 node_username: state.username.clone(),
-            }),
-        )
-        .unwrap();
+            });
+
         if let Err(e) = swarm
             .behaviour_mut()
-            .gossipsub
-            .publish(topic.clone(), reg_start_resp_message)
+            .request_response
+            .send_response(channel, reg_start_resp_message)
         {
             println!("[REG INIT] Publish error: {e:?}");
         } else {
@@ -718,32 +712,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .get(&reg_finish_req.node_username)
                 .unwrap()
                 .clone();
-            let reg_finish_req_message = serde_json::to_vec(
-                &BroadcastMessage::OPRFRegFinishReqMessage(OPRFRegFinishReqMessage {
+            let reg_finish_req_message =
+                RequestMessage::OPRFRegFinishReqMessage(OPRFRegFinishReqMessage {
                     reg_finish_req: reg_finish_req.clone(),
                     user_username: state.username.clone(),
                     node_index: index,
                     node_username: reg_finish_req.node_username.clone(),
-                }),
-            )
-            .unwrap();
-            let topic = state
-                .point_to_point_topics
-                .get(&reg_finish_req.node_username)
-                .unwrap()
-                .clone();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), reg_finish_req_message);
-            if let Err(e) = message_id {
-                println!("[REG START RESP] Publish error: {e:?}");
-            } else {
-                println!(
-                    "[REG START RESP] Sending reg start finish message for user {} at index {}",
-                    state.username, index
-                );
-            }
+                });
+
+            send_request_msg(
+                swarm,
+                state,
+                reg_finish_req.node_username.clone(),
+                reg_finish_req_message,
+            );
+            println!(
+                "[REG START RESP] Sending reg start finish message for user {} at index {}",
+                state.username, index
+            );
         }
 
         Ok(())
@@ -790,34 +776,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .values()
             .map(|v| v.clone())
             .collect();
-        for (address, index) in recovery_addresses.iter() {
-            let topic = state
-                .point_to_point_topics
-                .get(&address.clone())
-                .unwrap()
-                .clone();
-            let login_start_req = serde_json::to_vec(
-                &BroadcastMessage::OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage {
+        for (username, index) in recovery_addresses.iter() {
+            let login_start_req =
+                RequestMessage::OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage {
                     recovery_start_req: recovery_start_req.clone(),
                     other_indices: other_indices.clone(),
                     user_username: state.username.clone(),
                     node_index: index.clone(),
-                    node_username: address.clone(),
-                }),
-            )
-            .unwrap();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), login_start_req);
-            if let Err(e) = message_id {
-                println!("[REC INIT] Publish error: {e:?}");
-            } else {
-                println!(
-                    "[REC INIT] Sending initial req for user {} at index {}",
-                    state.username, index
-                );
-            }
+                    node_username: username.clone(),
+                });
+
+            send_request_msg(swarm, &mut state, username.clone(), login_start_req);
+            println!(
+                "[REC INIT] Sending initial req for user {} at index {}",
+                state.username, index
+            );
         }
 
         Ok(())
@@ -828,30 +801,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm: &mut Swarm<P2PBehaviour>,
         _peer_id: PeerId,
         message: OPRFRecoveryStartReqMessage,
+        channel: ResponseChannel<ResponseMessage>,
     ) -> Result<(), Box<dyn Error>> {
         let rec_start_resp = state.opaque_node.peer_login_start(
             message.recovery_start_req,
             message.node_index,
             message.other_indices,
         )?;
-        let rec_start_resp_message = serde_json::to_vec(
-            &BroadcastMessage::OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage {
+        let rec_start_resp_message =
+            ResponseMessage::OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage {
                 recovery_start_resp: rec_start_resp,
                 user_username: message.user_username.clone(),
                 node_index: message.node_index,
                 node_username: state.username.clone(),
-            }),
-        )
-        .unwrap();
-        let topic = state
-            .point_to_point_topics
-            .get(&message.user_username)
-            .unwrap()
-            .clone();
+            });
+
         if let Err(e) = swarm
             .behaviour_mut()
-            .gossipsub
-            .publish(topic.clone(), rec_start_resp_message)
+            .request_response
+            .send_response(channel, rec_start_resp_message)
         {
             println!("[REC START REQ] Publish error: {e:?}");
         } else {
@@ -902,30 +870,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 "Not enough recovery addresses for this threshold",
             ));
         }
-        for (address, index) in state.username_to_index.iter() {
-            let topic = state.point_to_point_topics.get(&address.clone()).unwrap();
-            let init_message = serde_json::to_vec(&BroadcastMessage::DPSSRefreshInitMessage(
-                DPSSRefreshInitMessage {
-                    new_recovery_addresses: new_recovery_addresses.clone(),
-                    new_threshold,
-                    user_username: state.username.clone(),
-                    node_index: index.clone(),
-                    node_username: address.clone(),
-                },
-            ))
-            .unwrap();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), init_message);
-            if let Err(e) = message_id {
-                println!("[DPSS INIT] Publish error: {e:?}");
-            } else {
-                println!(
-                    "[DPSS INIT] Sending init message for user {}",
-                    state.username
-                );
-            }
+
+        let username_to_index_map = state.username_to_index.clone();
+        for (username, index) in username_to_index_map.iter() {
+            let init_message = RequestMessage::DPSSRefreshInitMessage(DPSSRefreshInitMessage {
+                new_recovery_addresses: new_recovery_addresses.clone(),
+                new_threshold,
+                user_username: state.username.clone(),
+                node_index: index.clone(),
+                node_username: username.clone(),
+            });
+
+            send_request_msg(swarm, &mut state, username.clone(), init_message);
+            println!(
+                "[DPSS INIT] Sending init message for user {}",
+                state.username
+            );
         }
 
         state.username_to_index = new_recovery_addresses;
@@ -960,14 +920,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .map(|(_, v)| (i32_to_scalar(v.1), v.0.c_i.clone()))
             .collect();
 
-        for (address, index) in message.new_recovery_addresses.iter() {
-            let topic = state
-                .point_to_point_topics
-                .get(&address.clone())
-                .unwrap()
-                .clone();
-            let reshare_msg = serde_json::to_vec(&BroadcastMessage::DPSSRefreshReshareMessage(
-                DPSSRefreshReshareMessage {
+        for (username, index) in message.new_recovery_addresses.iter() {
+            let reshare_msg =
+                RequestMessage::DPSSRefreshReshareMessage(DPSSRefreshReshareMessage {
                     inputs: state.acss_inputs.clone(),
                     dealer_shares: acss_dealer_share_s.clone(),
                     dealer_shares_hat: acss_dealer_share_s_hat.clone(),
@@ -976,22 +931,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     commitments: old_commitments.clone(),
                     user_username: state.username.clone(),
                     node_index: index.clone(),
-                    node_username: address.clone(),
-                },
-            ))
-            .unwrap();
-            let message_id = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), reshare_msg);
-            if let Err(e) = message_id {
-                println!("[DPSS REFR INIT] Publish error: {e:?}");
-            } else {
-                println!(
-                    "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at index {}",
-                    state.username, index
-                );
-            }
+                    node_username: username.clone(),
+                });
+
+            send_request_msg(swarm, state, username.clone(), reshare_msg);
+            println!(
+                "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at index {}",
+                state.username, index
+            );
         }
 
         if !message.new_recovery_addresses.contains_key(&state.username) {
@@ -1084,7 +1031,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         file.write_all(serialized_peers.as_bytes())?;
 
         let (_recv_addr_kad_record, recv_addr_record) = KadRecord::new(
-            RecordKey::new(&format!("/peer_id/{}", state.peer_id)),
+            RecordKey::new(&format!("/recv_addr/{}", state.peer_id)),
             KadRecordType::RecvAddr(state.username_to_index.clone(), state.threshold),
             state.username.clone(),
             state.peer_id,
@@ -1099,27 +1046,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn add_peer(_state_arc: Arc<Mutex<NodeState>>, swarm: &mut Swarm<P2PBehaviour>, peer: PeerId) {
+    fn add_peer(
+        _state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+        peer: PeerId,
+        multiaddr: Multiaddr,
+    ) {
         println!("[LOCAL] Routing updated with peer: {:?}", peer);
         if let Err(e) = swarm.dial(peer) {
             println!("[LOCAL] Failed to dial peer {:?}", e);
         }
-        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+        swarm
+            .behaviour_mut()
+            .kad
+            .add_address(&peer, multiaddr.clone());
+        swarm.add_peer_address(peer, multiaddr);
     }
 
     fn remove_peer(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         peer: PeerId,
+        multiaddr: Multiaddr,
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
-        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
-        let username = state.peer_id_to_username.get(&peer).unwrap().clone();
-        if let Some(topic) = state.point_to_point_topics.get(&username) {
-            swarm.behaviour_mut().gossipsub.unsubscribe(&topic)?;
-            state.point_to_point_topics.remove(&username);
+        swarm.behaviour_mut().kad.remove_address(&peer, &multiaddr);
+
+        let username_peer_id_map = state.username_to_peer_id.clone();
+        for (k, v) in username_peer_id_map.iter() {
+            if v.clone() == peer.clone() {
+                swarm
+                    .behaviour_mut()
+                    .kad
+                    .remove_record(&RecordKey::new(&format!("/peer_id/{}", k)));
+                state.username_to_peer_id.remove(k);
+            }
         }
-        state.peer_id_to_username.remove(&peer);
+
         Ok(())
     }
 
@@ -1137,12 +1100,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[tauri::command]
     fn get_peers(state: State<TauriState>) -> Vec<String> {
         let node_state = state.0.lock().unwrap();
-        return Vec::from_iter(
-            node_state
-                .point_to_point_topics
-                .keys()
-                .map(|v| v.to_string()),
-        );
+        return Vec::from_iter(node_state.username_to_peer_id.keys().map(|v| v.to_string()));
     }
 
     #[tauri::command]
@@ -1467,45 +1425,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             state.username_to_index = recv_addrs;
                             state.threshold = threshold;
                         }
-                        KadRecordType::PeerId => {
-                            let peer_id_username_map = state.peer_id_to_username.clone();
-                            for (k, v) in peer_id_username_map.iter() {
-                                if v.clone() == deserialized_actual_record.username.clone() {
-                                    state.peer_id_to_username.remove(&k);
+                        KadRecordType::PeerId(peer_id) => {
+                            let username_peer_id_map = state.username_to_peer_id.clone();
+                            for (k, v) in username_peer_id_map.iter() {
+                                if v.clone() == peer_id.clone() {
+                                    state.username_to_peer_id.remove(k);
                                 }
                             }
-                            state.peer_id_to_username.insert(
-                                actual_record.publisher.unwrap(),
+                            state.username_to_peer_id.insert(
                                 deserialized_actual_record.username.clone(),
+                                actual_record.publisher.unwrap(),
                             );
-                        }
-                    }
-                    if state.username != deserialized_actual_record.username.clone() {
-                        if let None = state
-                            .point_to_point_topics
-                            .get(&deserialized_actual_record.username)
-                        {
-                            let topic_name;
-                            if state.username < deserialized_actual_record.username {
-                                topic_name = format!(
-                                    "{}-{}",
-                                    state.username, deserialized_actual_record.username
-                                );
-                            } else {
-                                topic_name = format!(
-                                    "{}-{}",
-                                    deserialized_actual_record.username, state.username
-                                );
-                            }
-                            let topic = gossipsub::IdentTopic::new(topic_name);
-                            state
-                                .point_to_point_topics
-                                .insert(deserialized_actual_record.username, topic.clone());
-                            if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
-                                println!(
-                                    "[DEBUG] Could not subscribe to topic {:?}: {:?}",
-                                    topic, e
-                                )
+
+                            let queued_msgs_option = state
+                                .waiting_for_peer_id
+                                .get(&deserialized_actual_record.username);
+                            if let Some(queued_msgs) = queued_msgs_option {
+                                for msg in queued_msgs.iter() {
+                                    swarm
+                                        .behaviour_mut()
+                                        .request_response
+                                        .send_request(&peer_id, msg.clone());
+                                }
                             }
                         }
                     }
@@ -1587,14 +1528,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             event = swarm.select_next_some() => match event {
                                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                                     for (peer, multiaddr) in list {
-                                        add_peer(state_arc.clone(), &mut swarm, peer);
-                                        swarm.behaviour_mut().kad.add_address(&peer, multiaddr);
+                                        add_peer(state_arc.clone(), &mut swarm, peer, multiaddr);
                                     }
                                 },
                                 SwarmEvent::Behaviour(P2PBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                                     for (peer, multiaddr) in list {
-                                        remove_peer(state_arc.clone(), &mut swarm, peer).unwrap();
-                                        swarm.behaviour_mut().kad.remove_address(&peer, &multiaddr);
+                                        remove_peer(state_arc.clone(), &mut swarm, peer, multiaddr).unwrap();
                                     }
                                 },
                                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, is_new_peer, .. })) => {
@@ -1628,13 +1567,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                 },
-                                SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                                    propagation_source: peer_id,
-                                    message_id: _,
-                                    message,
-                                })) => {
-                                    handle_message(state_arc.clone(), &mut swarm, peer_id, message).unwrap();
-                                    update_recovery_addrs(state_arc.clone(), &mut swarm).unwrap();
+                                SwarmEvent::Behaviour(P2PBehaviourEvent::RequestResponse(
+                                    request_response::Event::Message { message, peer },
+                                )) => match message {
+                                    request_response::Message::Request { request, channel, .. } => {
+                                        handle_request(state_arc.clone(), &mut swarm, peer, request, channel).unwrap();
+                                    }
+                                    request_response::Message::Response { response, .. } => {
+                                        handle_response(state_arc.clone(), &mut swarm, peer, response).unwrap();
+                                    }
                                 },
                                 SwarmEvent::NewListenAddr { address, .. } => {
                                     println!("[LOCAL] Node peer ID: {address}");
@@ -1650,12 +1591,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 },
                                 SwarmEvent::ListenerError { error, .. } => {
                                     println!("[LOCAL] Listener error {:?}", error);
-                                },
-                                SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) => {
-                                    println!("[LOCAL] Subscribed to {} on {}", topic, peer_id);
-                                },
-                                SwarmEvent::Behaviour(P2PBehaviourEvent::Gossipsub(gossipsub::Event::Unsubscribed { peer_id, topic })) => {
-                                    println!("[LOCAL] Unsubscribed from {} on {}", topic, peer_id);
                                 },
                                 _ => {}
                             }
