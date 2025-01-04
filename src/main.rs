@@ -60,7 +60,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{select, sync::mpsc};
 use util::i32_to_scalar;
 
@@ -87,6 +87,7 @@ struct NodeState {
     reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare)>>,
     kad_filtering: HashMap<QueryId, Record>,
     waiting_for_peer_id: HashMap<String, Vec<RequestMessage>>,
+    tauri_handle: Option<AppHandle>,
 }
 
 #[serde_as]
@@ -193,6 +194,14 @@ enum TauriToRustCommand {
     RegStart(String, String, HashMap<String, i32>, usize),
     RecoveryStart(String, String, HashMap<String, i32>),
     RefreshStart(HashMap<String, i32>, i32),
+    GetRecvAddrs(String),
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct TauriRecvAddr {
+    username: String,
+    recovery_addresses: HashMap<String, i32>,
+    threshold: usize,
 }
 
 /*#[derive(Clone, Debug, Eq, PartialEq)]
@@ -207,7 +216,7 @@ impl std::hash::Hash for HashedKadRecord {
     }
 }*/
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct KadRecord {
     data: KadRecordType,
     username: String,
@@ -247,7 +256,7 @@ impl KadRecord {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 enum KadRecordType {
     Pk(PublicKey),
     RecvAddr(HashMap<String, i32>, usize),
@@ -341,14 +350,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         registration_received: None,
         recovery_received: None,
         reshare_received: None,
-        threshold: 1, // temp
         kad_filtering: HashMap::new(),
         waiting_for_peer_id: HashMap::new(),
+        tauri_handle: None,
     };
     let mut is_bootstrap = false;
     let mut bootstrap_keypair: libp2p::identity::ed25519::Keypair =
         libp2p::identity::ed25519::Keypair::generate();
-    let mut bootstrap_username = "".to_string();
 
     let args: Vec<String> = env::args().collect();
     if args.len() == 3 && args[1] != "BOOTSTRAP" {
@@ -1047,7 +1055,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         file.write_all(serialized_peers.as_bytes())?;
 
         let (_recv_addr_kad_record, recv_addr_record) = KadRecord::new(
-            RecordKey::new(&format!("/recv_addr/{}", state.peer_id)),
+            RecordKey::new(&format!("/recv_addr/{}", state.username)),
             KadRecordType::RecvAddr(state.username_to_index.clone(), state.threshold),
             state.username.clone(),
             state.peer_id,
@@ -1139,6 +1147,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn get_threshold(state: State<TauriState>) -> i32 {
         let node_state = state.0.lock().unwrap();
         node_state.threshold.try_into().unwrap()
+    }
+
+    #[tauri::command]
+    fn get_recovery_addresses(state: State<TauriState>, username: String) {
+        let tx_clone = state.1.clone();
+        tauri::async_runtime::spawn(async move {
+            tx_clone
+                .send(TauriToRustCommand::GetRecvAddrs(username))
+                .await
+                .unwrap();
+        });
     }
 
     fn save_local_envelope(
@@ -1405,6 +1424,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state.kad_filtering.insert(query_id, record.clone());
     }
 
+    fn handle_kad_data_store_emit(
+        state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+        deserialized_record: KadRecord,
+        record: Record,
+    ) {
+        let mut state = state_arc.lock().unwrap();
+
+        match deserialized_record.data {
+            KadRecordType::Pk(public_key) => {
+                state
+                    .username_to_opaque_pkey
+                    .insert(deserialized_record.username.clone(), public_key);
+            }
+            KadRecordType::RecvAddr(recovery_addresses, threshold) => {
+                if let Err(e) = state.tauri_handle.clone().unwrap().emit(
+                    "recv_addr",
+                    TauriRecvAddr {
+                        username: deserialized_record.username.clone(),
+                        recovery_addresses,
+                        threshold,
+                    },
+                ) {
+                    println!("[KAD] Tauri could not emit recovery addresses: {:?}", e);
+                }
+            }
+            KadRecordType::PeerId(peer_id) => {
+                let username_peer_id_map = state.username_to_peer_id.clone();
+                for (k, v) in username_peer_id_map.iter() {
+                    if v.clone() == peer_id.clone() {
+                        state.username_to_peer_id.remove(k);
+                    }
+                }
+                state.username_to_peer_id.insert(
+                    deserialized_record.username.clone(),
+                    record.publisher.unwrap(),
+                );
+
+                let queued_msgs_option =
+                    state.waiting_for_peer_id.get(&deserialized_record.username);
+                if let Some(queued_msgs) = queued_msgs_option {
+                    for msg in queued_msgs.iter() {
+                        swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&peer_id, msg.clone());
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_kad_found_record(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
@@ -1424,6 +1495,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut signature_message = actual_record.key.to_vec();
             signature_message.extend(deserialized_actual_record.signed_data());
             if deserialized_actual_record
+                .clone()
                 .signature
                 .verify(signature_message.as_slice(), public_key)
             {
@@ -1443,41 +1515,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         actual_record.clone().key
                     );
                     state.kad_filtering.remove(&query_id);
-                    match deserialized_actual_record.data {
-                        KadRecordType::Pk(public_key) => {
-                            state
-                                .username_to_opaque_pkey
-                                .insert(deserialized_actual_record.username.clone(), public_key);
-                        }
-                        KadRecordType::RecvAddr(recv_addrs, threshold) => {
-                            state.username_to_index = recv_addrs;
-                            state.threshold = threshold;
-                        }
-                        KadRecordType::PeerId(peer_id) => {
-                            let username_peer_id_map = state.username_to_peer_id.clone();
-                            for (k, v) in username_peer_id_map.iter() {
-                                if v.clone() == peer_id.clone() {
-                                    state.username_to_peer_id.remove(k);
-                                }
-                            }
-                            state.username_to_peer_id.insert(
-                                deserialized_actual_record.username.clone(),
-                                actual_record.publisher.unwrap(),
-                            );
-
-                            let queued_msgs_option = state
-                                .waiting_for_peer_id
-                                .get(&deserialized_actual_record.username);
-                            if let Some(queued_msgs) = queued_msgs_option {
-                                for msg in queued_msgs.iter() {
-                                    swarm
-                                        .behaviour_mut()
-                                        .request_response
-                                        .send_request(&peer_id, msg.clone());
-                                }
-                            }
-                        }
-                    }
+                    std::mem::drop(state);
+                    handle_kad_data_store_emit(
+                        state_arc.clone(),
+                        swarm,
+                        deserialized_actual_record,
+                        actual_record.clone(),
+                    );
                 }
             }
         }
@@ -1521,6 +1565,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    fn handle_get_recv_addrs_init(swarm: &mut Swarm<P2PBehaviour>, username: String) {
+        let query_id = swarm
+            .behaviour_mut()
+            .kad
+            .get_record(RecordKey::new(&format!("/recv_addr/{}", username.clone())));
+
+        println!(
+            "[RECOVERY GET] Getting recovery addresses for {:?} at query ID {:?}",
+            username, query_id
+        );
+    }
+
+    fn pass_tauri_handle(state_arc: Arc<Mutex<NodeState>>, handle: AppHandle) {
+        let mut state = state_arc.lock().unwrap();
+        state.tauri_handle = Some(handle);
+    }
+
     tauri::async_runtime::set(tokio::runtime::Handle::current());
     tauri::Builder::default()
             .invoke_handler(tauri::generate_handler![
@@ -1534,7 +1595,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 set_username,
                 local_recovery,
                 local_refresh,
-                tauri_save_local_envelope
+                tauri_save_local_envelope,
+                get_recovery_addresses
             ])
             .manage(TauriState(Arc::clone(&state_arc), tx))
             .setup(move |app| {
@@ -1558,6 +1620,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                                 TauriToRustCommand::RefreshStart(recovery_nodes, new_threshold) => {
                                     handle_refresh_init(state_arc.clone(), &mut swarm, recovery_nodes, new_threshold as usize).unwrap();
+                                }
+                                TauriToRustCommand::GetRecvAddrs(username) => {
+                                    handle_get_recv_addrs_init(&mut swarm, username);
                                 }
                             },
                             event = swarm.select_next_some() => match event {
