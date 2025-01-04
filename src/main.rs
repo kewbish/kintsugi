@@ -72,6 +72,7 @@ struct NodeState {
     username: String,
     opaque_keypair: Keypair,
     libp2p_keypair_bytes: [u8; 64],
+    is_bootstrap: bool,
     threshold: usize,
     username_to_peer_id: HashMap<String, PeerId>,
     username_to_index: HashMap<String, i32>, // this node's recovery nodes' indices
@@ -262,7 +263,6 @@ struct EncryptedTauriNotepad {
 #[allow(deprecated)]
 fn new_swarm(
     keypair: libp2p::identity::ed25519::Keypair,
-    username: String,
 ) -> Result<Swarm<P2PBehaviour>, Box<dyn Error>> {
     let libp2p_keypair = libp2p::identity::Keypair::from(keypair);
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(libp2p_keypair.clone())
@@ -321,13 +321,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (tx, mut rx) = mpsc::channel::<TauriToRustCommand>(32);
     let mut state = NodeState {
-        peer_id: PeerId::random(),         // temp
-        username_to_index: HashMap::new(), // temp
-        username: "".to_string(),          // temp
-        username_to_peer_id: HashMap::new(),
-        username_to_opaque_pkey: HashMap::new(),
+        peer_id: PeerId::random(), // temp
+        username: "".to_string(),  // temp
         opaque_keypair: Keypair::new(),
         libp2p_keypair_bytes: [0u8; 64],
+        is_bootstrap: false,
+        threshold: 1, // temp
+        username_to_peer_id: HashMap::new(),
+        username_to_index: HashMap::new(), // temp
+        username_to_opaque_pkey: HashMap::new(),
         acss_inputs: ACSSInputs {
             h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
             degree: 1,
@@ -354,6 +356,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state.peer_id = PeerId::from_str(&args[2])?;
     } else if args.len() == 3 && args[1] == "BOOTSTRAP" {
         is_bootstrap = true;
+        state.is_bootstrap = true;
         let file_path = format!("tmp/bootstrap_0.envelope");
         if Path::new(&file_path).exists() {
             let parsed_index: i32 = args[2].parse()?;
@@ -363,7 +366,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 serde_json::from_str(&contents.unwrap())?;
 
             state.username = format!("bootstrap{parsed_index}");
-            bootstrap_username = state.username.clone();
             state.peer_id = bootstrap_node_state.peer_id;
             state.libp2p_keypair_bytes = bootstrap_node_state.libp2p_keypair_bytes;
             bootstrap_keypair = libp2p::identity::ed25519::Keypair::try_from_bytes(
@@ -390,7 +392,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 if i == 0 {
                     state.username = format!("bootstrap{i}");
-                    bootstrap_username = state.username.clone();
                     state.peer_id = new_peer_id;
                     state.libp2p_keypair_bytes = libp2p_keypair.to_bytes();
                     bootstrap_keypair = libp2p_keypair;
@@ -407,9 +408,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bootstrap_keypair.public(),
         ));
     }
+
     let state_arc = Arc::new(Mutex::new(state));
 
-    let mut swarm = new_swarm(bootstrap_keypair, bootstrap_username)?;
+    let mut swarm = new_swarm(bootstrap_keypair)?;
 
     fn handle_request(
         state_arc: Arc<Mutex<NodeState>>,
@@ -554,6 +556,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         msg: RequestMessage,
     ) {
         let destination_peer_id = state.username_to_peer_id.get(&username);
+        println!(
+            "[DEBUG] Sending to {:?}, peer ID {:?}",
+            username.clone(),
+            destination_peer_id
+        );
         match destination_peer_id {
             Some(peer) => {
                 swarm
@@ -584,10 +591,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
 
+        state.acss_inputs.peer_public_keys = recovery_addresses
+            .iter()
+            .map(|(k, _)| {
+                (
+                    k.clone(),
+                    state.username_to_opaque_pkey.get(k).unwrap().clone(),
+                )
+            })
+            .collect();
         state.acss_inputs.degree = threshold - 1;
 
         let s = Scalar::random(&mut OsRng);
-        let (acss_dealer_share, phi, phi_hat) = ACSS::share_dealer(
+        let (acss_dealer_shares, phi, phi_hat) = ACSS::share_dealer(
             state.acss_inputs.clone(),
             s,
             threshold - 1,
@@ -607,7 +623,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let init_message = RequestMessage::OPRFRegInitMessage(OPRFRegInitMessage {
                 inputs: state.acss_inputs.clone(),
                 reg_start_req: reg_start_req.clone(),
-                dealer_shares: acss_dealer_share.clone(),
+                dealer_shares: acss_dealer_shares.clone(),
                 dealer_key: state.opaque_keypair.public_key,
                 user_username: state.username.clone(),
                 node_index: index.clone(),
@@ -1047,7 +1063,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     fn add_peer(
-        _state_arc: Arc<Mutex<NodeState>>,
+        state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         peer: PeerId,
         multiaddr: Multiaddr,
@@ -1061,6 +1077,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .kad
             .add_address(&peer, multiaddr.clone());
         swarm.add_peer_address(peer, multiaddr);
+
+        let state = state_arc.lock().unwrap();
+        let is_bootstrap = state.is_bootstrap;
+        let threshold = state.threshold;
+        let bootstrap_username = state.username.clone();
+        std::mem::drop(state);
+
+        if is_bootstrap {
+            let result: Vec<&PeerId> = swarm.connected_peers().collect();
+            if result.len() > threshold {
+                if let Err(e) = handle_username_update(state_arc.clone(), swarm, bootstrap_username)
+                {
+                    println!("[BOOTSTRAP] Error updating username in DHT: {:?}", e);
+                }
+            }
+        }
     }
 
     fn remove_peer(
@@ -1382,10 +1414,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
 
         let kad_filtering = state.kad_filtering.clone();
-        println!(
-            "[KAD] Searching for {:?}, queued: {:?}",
-            query_id, kad_filtering
-        );
         let actual_record = kad_filtering.get(&query_id).unwrap();
         let deserialized_pk_record: KadRecord =
             serde_json::from_slice(pk_record.record.value.as_slice()).unwrap();
@@ -1463,10 +1491,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
 
         let kad_filtering = state.kad_filtering.clone();
-        println!(
-            "[KAD] Searching for {:?}, queued: {:?}",
-            query_id, kad_filtering
-        );
         let actual_record = kad_filtering.get(&query_id).unwrap();
         if let Err(e) = swarm
             .behaviour_mut()
@@ -1475,7 +1499,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .put(actual_record.clone())
         {
             println!(
-                "[KAD] Found, could not store final record {:?}",
+                "[KAD] DNF, could not store final record {:?}",
                 &e.to_string(),
             );
         } else {
@@ -1484,6 +1508,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 actual_record.clone().key
             );
             state.kad_filtering.remove(&query_id);
+
+            std::mem::drop(state);
+            let deserialized_actual_record: KadRecord =
+                serde_json::from_slice(actual_record.value.as_slice()).unwrap();
+            handle_kad_data_store_emit(
+                state_arc.clone(),
+                swarm,
+                deserialized_actual_record,
+                actual_record.clone(),
+            );
         }
     }
 
@@ -1509,13 +1543,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     main_window.hide()?;
                 }
 
+                pass_tauri_handle(state_arc.clone(), app.handle().clone());
                 tauri::async_runtime::spawn(async move {
                     loop {
                         select! {
                             Some(res) = rx.recv() => match res {
                                 TauriToRustCommand::RegStart(username, password, recovery_nodes, threshold) => {
                                     handle_username_update(state_arc.clone(), &mut swarm, username).unwrap();
-                                    // handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes, threshold).unwrap();
+                                    handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes, threshold).unwrap();
                                 }
                                 TauriToRustCommand::RecoveryStart(username, password, recovery_nodes) => {
                                     handle_username_update(state_arc.clone(), &mut swarm, username.clone()).unwrap();
