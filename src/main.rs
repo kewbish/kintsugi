@@ -202,6 +202,7 @@ struct TauriRecvAddr {
     username: String,
     recovery_addresses: HashMap<String, i32>,
     threshold: usize,
+    error: Option<String>,
 }
 
 /*#[derive(Clone, Debug, Eq, PartialEq)]
@@ -1467,6 +1468,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         username: deserialized_record.username.clone(),
                         recovery_addresses: recovery_addresses_hashmap,
                         threshold,
+                        error: None,
                     },
                 ) {
                     println!("[KAD] Tauri could not emit recovery addresses: {:?}", e);
@@ -1593,6 +1595,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
         query_id: QueryId,
+        key: RecordKey,
     ) {
         let mut state = state_arc.lock().unwrap();
 
@@ -1603,7 +1606,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let kad_filtering = state.kad_filtering.clone();
         let actual_record = kad_filtering.get(&query_id);
         if let None = actual_record {
-            println!("[KAD] DNF for query ID {:?}", query_id);
+            let key_str = String::from_utf8(key.to_vec()).unwrap();
+            if key_str.starts_with("/recv_addr/") {
+                let username = key_str.strip_prefix("/recv_addr/").unwrap().to_string();
+                if let Err(e) = state.tauri_handle.clone().unwrap().emit(
+                    "recv_addr",
+                    TauriRecvAddr {
+                        username: username.clone(),
+                        recovery_addresses: HashMap::new(),
+                        threshold: 0,
+                        error: Some(format!(
+                            "Recovery addresses for {} could not be found",
+                            username
+                        )),
+                    },
+                ) {
+                    println!(
+                        "[KAD] Tauri could not emit recovery addresses error: {:?}",
+                        e
+                    );
+                } else {
+                    println!("[KAD] Emitted Tauri update, not found")
+                }
+            }
             return;
         }
         let actual_record = actual_record.unwrap();
@@ -1718,13 +1743,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                      }
                                 },
                                 SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { id, result, .. })) => {
-                                    // println!("[KAD] Query {:?}: {:?}", id, result.clone()); //
-                                    // TODO
                                     match result {
                                         kad::QueryResult::GetRecord(r) => {
                                             match r {
                                                 Ok(GetRecordOk::FoundRecord(r_ok)) => handle_kad_found_record(state_arc.clone(), &mut swarm, r_ok, id),
-                                                Err(GetRecordError::NotFound{..}) => handle_kad_no_add_record(state_arc.clone(), &mut swarm, id),
+                                                Err(GetRecordError::NotFound{ key, .. }) => handle_kad_no_add_record(state_arc.clone(), &mut swarm, id, key),
                                                 _ => {}
                                             }
                                         }

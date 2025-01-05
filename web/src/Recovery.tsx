@@ -18,12 +18,16 @@ const Recovery = () => {
   const [username, setUsername] = useState<string>("");
   const [debouncedUsername] = useDebounce(username, 500);
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!!debouncedUsername && debouncedUsername.length > 0) {
-      invoke("get_recovery_addresses", { username: debouncedUsername }).catch(
-        (err) => toast.error(err)
-      );
+      invoke("get_recovery_addresses", { username: debouncedUsername })
+        .then(() => {
+          setPeers([]);
+          setLoading(true);
+        })
+        .catch((err) => toast.error(err));
     }
   }, [debouncedUsername]);
 
@@ -31,14 +35,20 @@ const Recovery = () => {
     username: string;
     recovery_addresses: { string: number };
     threshold: number;
+    error: string | null;
   };
 
   useEffect(() => {
     const registerListener = async () => {
-      const unlisten = listen<TauriRecvAddr>("recv_addr", (e) => {
-        if (e.payload.username === username) {
-          setPeers(Object.keys(e.payload.recovery_addresses).sort());
-          setThreshold(e.payload.threshold);
+      const unlisten = await listen<TauriRecvAddr>("recv_addr", (e) => {
+        if (e.payload.username === debouncedUsername) {
+          setLoading(false);
+          if (e.payload.error !== null) {
+            toast.error(e.payload.error);
+          } else {
+            setPeers(Object.keys(e.payload.recovery_addresses).sort());
+            setThreshold(e.payload.threshold);
+          }
         }
       });
       return unlisten;
@@ -48,7 +58,7 @@ const Recovery = () => {
     return () => {
       unlisten.then((fn) => fn && fn());
     };
-  }, []);
+  }, [debouncedUsername]);
 
   const { setIsLoggedIn } = useContext(AuthContext);
 
@@ -103,7 +113,7 @@ const Recovery = () => {
           />
           <hr />
           {debouncedUsername.length != 0 ? (
-            peers.length != 0 ? (
+            !loading ? (
               <>
                 {peers.map((peer, i) => (
                   <div
