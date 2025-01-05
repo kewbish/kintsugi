@@ -23,10 +23,9 @@ use curve25519_dalek::{RistrettoPoint, Scalar};
 use dpss::DPSS;
 use futures::prelude::*;
 use keypair::{Keypair, PublicKey};
-use libp2p::kad::QueryResult;
 use libp2p::kad::{
     store::{MemoryStore, RecordStore},
-    GetRecordOk, PeerRecord,
+    GetRecordError, GetRecordOk, PeerRecord,
 };
 use libp2p::{
     identify,
@@ -51,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, Bytes};
 use sha3::{Digest, Sha3_256};
 use signature::Signature;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -86,6 +85,7 @@ struct NodeState {
     recovery_received: Option<HashMap<String, LoginStartResponse>>,
     reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare)>>,
     kad_filtering: HashMap<QueryId, Record>,
+    kad_done: HashSet<QueryId>,
     waiting_for_peer_id: HashMap<String, Vec<RequestMessage>>,
     tauri_handle: Option<AppHandle>,
 }
@@ -259,7 +259,7 @@ impl KadRecord {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 enum KadRecordType {
     Pk(PublicKey),
-    RecvAddr(HashMap<String, i32>, usize),
+    RecvAddr(BTreeMap<String, i32>, usize),
     PeerId(PeerId),
 }
 
@@ -351,6 +351,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         recovery_received: None,
         reshare_received: None,
         kad_filtering: HashMap::new(),
+        kad_done: HashSet::new(),
         waiting_for_peer_id: HashMap::new(),
         tauri_handle: None,
     };
@@ -436,7 +437,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             RequestMessage::OPRFRegFinishReqMessage(msg) => {
                 handle_message_reg_finish_req(&mut state, swarm, peer_id, msg)?;
-                update_recovery_addrs(state_arc.clone(), swarm)
+                update_recovery_addrs_local(&mut state)
             }
             RequestMessage::OPRFRecoveryStartReqMessage(msg) => {
                 handle_message_rec_start_req(&mut state, swarm, peer_id, msg, channel)
@@ -479,6 +480,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             state.username = username.clone();
             state.opaque_node.id = username.clone();
+            let pkey = state.opaque_keypair.public_key.clone();
+            state.username_to_opaque_pkey.insert(username.clone(), pkey);
 
             println!("[DEBUG] Updating username to {:?}", username.clone());
 
@@ -1039,12 +1042,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn update_recovery_addrs(
-        state_arc: Arc<Mutex<NodeState>>,
-        swarm: &mut Swarm<P2PBehaviour>,
-    ) -> Result<(), Box<dyn Error>> {
-        let state = state_arc.lock().unwrap();
-
+    fn update_recovery_addrs_local(state: &mut NodeState) -> Result<(), Box<dyn Error>> {
         let serialized_peers = serde_json::to_string(&(
             state.threshold.clone(),
             state.username_to_index.clone(),
@@ -1054,9 +1052,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut file = fs::File::create(file_path)?;
         file.write_all(serialized_peers.as_bytes())?;
 
+        Ok(())
+    }
+
+    fn update_recovery_addrs(
+        state_arc: Arc<Mutex<NodeState>>,
+        swarm: &mut Swarm<P2PBehaviour>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut state = state_arc.lock().unwrap();
+
+        update_recovery_addrs_local(&mut state)?;
+
         let (_recv_addr_kad_record, recv_addr_record) = KadRecord::new(
             RecordKey::new(&format!("/recv_addr/{}", state.username)),
-            KadRecordType::RecvAddr(state.username_to_index.clone(), state.threshold),
+            KadRecordType::RecvAddr(
+                BTreeMap::from_iter(
+                    state
+                        .username_to_index
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                ),
+                state.threshold,
+            ),
             state.username.clone(),
             state.peer_id,
             state.opaque_keypair.clone(),
@@ -1439,15 +1456,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .insert(deserialized_record.username.clone(), public_key);
             }
             KadRecordType::RecvAddr(recovery_addresses, threshold) => {
+                let recovery_addresses_hashmap = HashMap::from_iter(
+                    recovery_addresses
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
                 if let Err(e) = state.tauri_handle.clone().unwrap().emit(
                     "recv_addr",
                     TauriRecvAddr {
                         username: deserialized_record.username.clone(),
-                        recovery_addresses,
+                        recovery_addresses: recovery_addresses_hashmap,
                         threshold,
                     },
                 ) {
                     println!("[KAD] Tauri could not emit recovery addresses: {:?}", e);
+                } else {
+                    println!("[KAD] Emitted Tauri update")
                 }
             }
             KadRecordType::PeerId(peer_id) => {
@@ -1484,44 +1508,82 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) {
         let mut state = state_arc.lock().unwrap();
 
+        if state.kad_done.contains(&query_id) {
+            return;
+        }
+
         let kad_filtering = state.kad_filtering.clone();
-        let actual_record = kad_filtering.get(&query_id).unwrap();
-        let deserialized_pk_record: KadRecord =
-            serde_json::from_slice(pk_record.record.value.as_slice()).unwrap();
-        let deserialized_actual_record: KadRecord =
-            serde_json::from_slice(actual_record.value.as_slice()).unwrap();
-        // shouldn't be any other record type
-        if let KadRecordType::Pk(public_key) = deserialized_pk_record.data {
-            let mut signature_message = actual_record.key.to_vec();
+        let actual_record = kad_filtering.get(&query_id);
+        if let None = actual_record {
+            let deserialized_actual_record: KadRecord =
+                serde_json::from_slice(pk_record.record.value.as_slice()).unwrap();
+            let peer_pkey = state
+                .username_to_opaque_pkey
+                .get(&deserialized_actual_record.username)
+                .unwrap();
+            let mut signature_message = pk_record.record.key.to_vec();
             signature_message.extend(deserialized_actual_record.signed_data());
             if deserialized_actual_record
                 .clone()
                 .signature
-                .verify(signature_message.as_slice(), public_key)
+                .verify(signature_message.as_slice(), peer_pkey.clone())
             {
-                if let Err(e) = swarm
-                    .behaviour_mut()
-                    .kad
-                    .store_mut()
-                    .put(actual_record.clone())
-                {
-                    println!(
-                        "[KAD] Found, could not store final record {:?}",
-                        &e.to_string(),
-                    );
-                } else {
-                    println!(
-                        "[KAD] Found, stored final record {:?}",
-                        actual_record.clone().key
-                    );
-                    state.kad_filtering.remove(&query_id);
+                println!(
+                    "[KAD] Found, processing data from final record {:?}",
+                    pk_record.clone().record.key
+                );
+                state.kad_done.insert(query_id);
+                // the only get without filtering should be for the recv addrs
+                if let KadRecordType::RecvAddr(_, _) = deserialized_actual_record.data {
                     std::mem::drop(state);
                     handle_kad_data_store_emit(
                         state_arc.clone(),
                         swarm,
                         deserialized_actual_record,
-                        actual_record.clone(),
+                        pk_record.record.clone(),
                     );
+                }
+            }
+        } else {
+            let actual_record = actual_record.unwrap();
+            let deserialized_pk_record: KadRecord =
+                serde_json::from_slice(pk_record.record.value.as_slice()).unwrap();
+            let deserialized_actual_record: KadRecord =
+                serde_json::from_slice(actual_record.value.as_slice()).unwrap();
+            // shouldn't be any other record type
+            if let KadRecordType::Pk(public_key) = deserialized_pk_record.data {
+                let mut signature_message = actual_record.key.to_vec();
+                signature_message.extend(deserialized_actual_record.signed_data());
+                if deserialized_actual_record
+                    .clone()
+                    .signature
+                    .verify(signature_message.as_slice(), public_key)
+                {
+                    if let Err(e) = swarm
+                        .behaviour_mut()
+                        .kad
+                        .store_mut()
+                        .put(actual_record.clone())
+                    {
+                        println!(
+                            "[KAD] Found, could not store final record {:?}",
+                            &e.to_string(),
+                        );
+                    } else {
+                        println!(
+                            "[KAD] Found, stored final record {:?}",
+                            actual_record.clone().key
+                        );
+                        state.kad_filtering.remove(&query_id);
+                        state.kad_done.insert(query_id);
+                        std::mem::drop(state);
+                        handle_kad_data_store_emit(
+                            state_arc.clone(),
+                            swarm,
+                            deserialized_actual_record,
+                            actual_record.clone(),
+                        );
+                    }
                 }
             }
         }
@@ -1534,8 +1596,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) {
         let mut state = state_arc.lock().unwrap();
 
+        if state.kad_done.contains(&query_id) {
+            return;
+        }
+
         let kad_filtering = state.kad_filtering.clone();
-        let actual_record = kad_filtering.get(&query_id).unwrap();
+        let actual_record = kad_filtering.get(&query_id);
+        if let None = actual_record {
+            println!("[KAD] DNF for query ID {:?}", query_id);
+            return;
+        }
+        let actual_record = actual_record.unwrap();
         if let Err(e) = swarm
             .behaviour_mut()
             .kad
@@ -1552,6 +1623,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 actual_record.clone().key
             );
             state.kad_filtering.remove(&query_id);
+            state.kad_done.insert(query_id);
 
             std::mem::drop(state);
             let deserialized_actual_record: KadRecord =
@@ -1573,7 +1645,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         println!(
             "[RECOVERY GET] Getting recovery addresses for {:?} at query ID {:?}",
-            username, query_id
+            RecordKey::new(&format!("/recv_addr/{}", username.clone())),
+            query_id
         );
     }
 
@@ -1644,27 +1717,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         handle_kad_inbound_request(state_arc.clone(), &mut swarm, record.unwrap());
                                      }
                                 },
-                                SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { id, result, step, .. })) => {
-                                    if step.last {
-                                        if let QueryResult::GetRecord(r) = result.clone() {
+                                SwarmEvent::Behaviour(P2PBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { id, result, .. })) => {
+                                    // println!("[KAD] Query {:?}: {:?}", id, result.clone()); //
+                                    // TODO
+                                    match result {
+                                        kad::QueryResult::GetRecord(r) => {
                                             match r {
                                                 Ok(GetRecordOk::FoundRecord(r_ok)) => handle_kad_found_record(state_arc.clone(), &mut swarm, r_ok, id),
-                                                Ok(GetRecordOk::FinishedWithNoAdditionalRecord{ .. }) => handle_kad_no_add_record(state_arc.clone(), &mut swarm, id),
-                                                Err(_) => {},
+                                                Err(GetRecordError::NotFound{..}) => handle_kad_no_add_record(state_arc.clone(), &mut swarm, id),
+                                                _ => {}
                                             }
                                         }
-                                        match result {
-                                            kad::QueryResult::PutRecord(Ok(kad::PutRecordOk { key })) => {
-                                                println!(
-                                                    "[KAD] Successfully put record {:?}",
-                                                    std::str::from_utf8(key.as_ref()).unwrap()
-                                                );
-                                            },
-                                            kad::QueryResult::PutRecord(Err(err)) => {
-                                                eprintln!("[KAD] Failed to put record: {err:?}");
-                                            },
-                                            _ => {}
-                                        }
+                                        kad::QueryResult::PutRecord(Ok(kad::PutRecordOk { key })) => {
+                                            println!(
+                                                "[KAD] Successfully put record {:?}",
+                                                std::str::from_utf8(key.as_ref()).unwrap()
+                                            );
+                                        },
+                                        kad::QueryResult::PutRecord(Err(err)) => {
+                                            println!("[KAD] Failed to put record: {err:?}");
+                                        },
+                                        _ => {}
                                     }
                                 },
                                 SwarmEvent::Behaviour(P2PBehaviourEvent::RequestResponse(

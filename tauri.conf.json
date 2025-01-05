@@ -20,7 +20,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "kintsugi-cap",
+          "windows": ["*"],
+          "permissions": ["core:event:default"]
+        }
+      ]
     },
     "trayIcon": null
   },

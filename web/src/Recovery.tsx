@@ -7,22 +7,47 @@ import { useDebounce } from "use-debounce";
 import CopyableCodeblock from "./components/CopyableCodeblock";
 import User from "./components/User";
 import { AuthContext } from "./components/AuthContext";
+import { listen } from "@tauri-apps/api/event";
 
 const Recovery = () => {
   const navigate = useNavigate();
 
   const [peers, setPeers] = useState<string[]>([]);
+  const [threshold, setThreshold] = useState<number>(0);
   const [selectedPeers, setSelectedPeers] = useState<boolean[]>([]);
   const [username, setUsername] = useState<string>("");
+  const [debouncedUsername] = useDebounce(username, 500);
   const [password, setPassword] = useState("");
 
   useEffect(() => {
-    invoke("get_peers")
-      .then((resp) => {
-        setPeers(resp as string[]);
-        setSelectedPeers(new Array((resp as string[]).length).fill(false));
-      })
-      .catch((err) => toast.error(err));
+    if (!!debouncedUsername && debouncedUsername.length > 0) {
+      invoke("get_recovery_addresses", { username: debouncedUsername }).catch(
+        (err) => toast.error(err)
+      );
+    }
+  }, [debouncedUsername]);
+
+  type TauriRecvAddr = {
+    username: string;
+    recovery_addresses: { string: number };
+    threshold: number;
+  };
+
+  useEffect(() => {
+    const registerListener = async () => {
+      const unlisten = listen<TauriRecvAddr>("recv_addr", (e) => {
+        if (e.payload.username === username) {
+          setPeers(Object.keys(e.payload.recovery_addresses).sort());
+          setThreshold(e.payload.threshold);
+        }
+      });
+      return unlisten;
+    };
+
+    const unlisten = registerListener();
+    return () => {
+      unlisten.then((fn) => fn && fn());
+    };
   }, []);
 
   const { setIsLoggedIn } = useContext(AuthContext);
@@ -60,43 +85,8 @@ const Recovery = () => {
     >
       <Link to="/">&lt; back</Link>
       <h1>Request recovery from peers</h1>
-      {peers != undefined ? (
-        peers.map((peer, i) => (
-          <div
-            style={{
-              border: "2px solid var(--main)",
-              borderRadius: "1em",
-              padding: "1em",
-              marginBottom: "0.5em",
-              cursor: "pointer",
-              backgroundColor: selectedPeers[i] ? "var(--main-light)" : "auto",
-            }}
-            key={peer + selectedPeers[i]}
-            onClick={() => {
-              setSelectedPeers((currentSelected) => {
-                let newSelected = currentSelected.slice();
-                newSelected[i] = !currentSelected[i];
-                return newSelected;
-              });
-            }}
-          >
-            <User user={peer} />
-          </div>
-        ))
-      ) : (
-        <Skeleton
-          height={136}
-          baseColor={"var(--background)"}
-          highlightColor={"var(--main-light)"}
-          borderRadius={"1em"}
-        />
-      )}
-      <h2>Recover your account</h2>
       <div>
-        <form
-          action=""
-          style={{ display: "flex", flexFlow: "column nowrap", gap: "1em" }}
-        >
+        <form action="" style={{ display: "flex", flexFlow: "column nowrap" }}>
           <label htmlFor="username">Username</label>
           <input
             type="text"
@@ -111,6 +101,46 @@ const Recovery = () => {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
+          <hr />
+          {debouncedUsername.length != 0 ? (
+            peers.length != 0 ? (
+              <>
+                {peers.map((peer, i) => (
+                  <div
+                    style={{
+                      border: "2px solid var(--main)",
+                      borderRadius: "1em",
+                      padding: "1em",
+                      marginBottom: "0.5em",
+                      cursor: "pointer",
+                      backgroundColor: selectedPeers[i]
+                        ? "var(--main-light)"
+                        : "auto",
+                    }}
+                    key={peer + selectedPeers[i]}
+                    onClick={() => {
+                      setSelectedPeers((currentSelected) => {
+                        let newSelected = currentSelected.slice();
+                        newSelected[i] = !currentSelected[i];
+                        return newSelected;
+                      });
+                    }}
+                  >
+                    <User user={peer} />
+                  </div>
+                ))}
+                <p>Select at least {threshold} recovery nodes to recover.</p>
+              </>
+            ) : (
+              <Skeleton
+                height={136}
+                baseColor={"var(--background)"}
+                highlightColor={"var(--main-light)"}
+                borderRadius={"1em"}
+                style={{ marginBottom: "1em" }}
+              />
+            )
+          ) : null}
           <div>
             <button
               style={{
@@ -118,7 +148,17 @@ const Recovery = () => {
                 marginRight: 0,
                 width: "fit-content",
               }}
-              disabled={selectedPeers.filter((v) => v).length < 3}
+              disabled={
+                selectedPeers.filter((v) => v).length < threshold ||
+                password.length === 0
+              }
+              title={
+                selectedPeers.filter((v) => v).length < threshold
+                  ? `Select ${threshold} or more recovery nodes to continue.`
+                  : password.length === 0
+                  ? "Enter your password to continue"
+                  : undefined
+              }
               onClick={startRecovery}
             >
               Done
