@@ -19,6 +19,7 @@ const Recovery = () => {
   const [debouncedUsername] = useDebounce(username, 500);
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
 
   useEffect(() => {
     if (!!debouncedUsername && debouncedUsername.length > 0) {
@@ -69,20 +70,44 @@ const Recovery = () => {
         recoveryNodes.set(peers[i][0], peers[i][1]);
       }
     }
-    console.log(recoveryNodes);
     invoke("local_recovery", { username, password, recoveryNodes })
       .then(() => {
-        /*invoke("tauri_save_local_envelope", { password })
-          .then(() => {
-            setIsLoggedIn(true); // if recovery was successful, can simply log in
-            toast.success("Successfully recovered keypair");
-            navigate("/");
-          })
-          .catch((err) => toast.error(err));*/
-        console.log("TODO");
+        setRecoveryLoading(true);
       })
       .catch((err) => toast.error(err));
   };
+
+  type TauriRecoveryFinished = {
+    username: string;
+    error: string | null;
+  };
+
+  useEffect(() => {
+    const registerListener = async () => {
+      const unlisten = await listen<TauriRecoveryFinished>("recovery", (e) => {
+        if (e.payload.username === debouncedUsername) {
+          setRecoveryLoading(false);
+          if (e.payload.error !== null) {
+            toast.error(e.payload.error);
+          } else {
+            invoke("tauri_save_local_envelope", { password })
+              .then(() => {
+                setIsLoggedIn(true); // if recovery was successful, can simply log in
+                toast.success("Successfully recovered keypair");
+                navigate("/");
+              })
+              .catch((err) => toast.error(err));
+          }
+        }
+      });
+      return unlisten;
+    };
+
+    const unlisten = registerListener();
+    return () => {
+      unlisten.then((fn) => fn && fn());
+    };
+  }, [debouncedUsername, password]);
 
   return (
     <div
@@ -160,7 +185,8 @@ const Recovery = () => {
               }}
               disabled={
                 selectedPeers.filter((v) => v).length < threshold ||
-                password.length === 0
+                password.length === 0 ||
+                recoveryLoading
               }
               title={
                 selectedPeers.filter((v) => v).length < threshold
@@ -171,7 +197,7 @@ const Recovery = () => {
               }
               onClick={startRecovery}
             >
-              Done
+              {recoveryLoading ? "Loading…" : "Done"}
             </button>
           </div>
         </div>

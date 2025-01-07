@@ -88,7 +88,6 @@ struct NodeState {
     kad_done: HashSet<QueryId>,
     waiting_for_peer_id: HashMap<String, Vec<RequestMessage>>,
     tauri_handle: Option<AppHandle>,
-    debug_evaluations: HashMap<Scalar, Scalar>,
 }
 
 #[serde_as]
@@ -119,7 +118,6 @@ struct OPRFRegStartRespMessage {
     user_username: String,
     node_index: i32,
     node_username: String,
-    debug_share: Scalar,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -204,6 +202,12 @@ struct TauriRecvAddr {
     username: String,
     recovery_addresses: HashMap<String, i32>,
     threshold: usize,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct TauriRecFinished {
+    username: String,
     error: Option<String>,
 }
 
@@ -353,7 +357,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         kad_done: HashSet::new(),
         waiting_for_peer_id: HashMap::new(),
         tauri_handle: None,
-        debug_evaluations: HashMap::new(), // TODO
     };
     state.opaque_node.keypair = state.opaque_keypair.clone();
     let mut is_bootstrap = false;
@@ -691,7 +694,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 user_username: message.user_username.clone(),
                 node_index: message.node_index,
                 node_username: state.username.clone(),
-                debug_share: node_share.s_i_d, // TODO
             });
 
         if let Err(e) = swarm
@@ -722,11 +724,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let mut s = state.registration_received.take().unwrap();
         s.insert(message.node_username, message.reg_start_resp.clone());
-
-        state.debug_evaluations.insert(
-            i32_to_scalar(message.reg_start_resp.index),
-            message.debug_share,
-        );
 
         if s.len() < state.threshold {
             state.registration_received = Some(s);
@@ -883,11 +880,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let opaque_keypair = state
             .opaque_node
-            .local_login_finish(s.values().map(|v| v.clone()).collect())?;
-        state.opaque_keypair = opaque_keypair.clone();
-        state.opaque_node.keypair = opaque_keypair;
+            .local_login_finish(s.values().map(|v| v.clone()).collect());
+        match opaque_keypair {
+            Ok(opaque_keypair) => {
+                state.opaque_keypair = opaque_keypair.clone();
+                state.opaque_node.keypair = opaque_keypair;
 
-        println!("[REC START RESP] Succesfully recovered keypair");
+                if let Err(e) = state.tauri_handle.clone().unwrap().emit(
+                    "recovery",
+                    TauriRecFinished {
+                        username: state.username.clone(),
+                        error: None,
+                    },
+                ) {
+                    println!("[REC START RESP] Tauri could not emit recovery: {:?}", e);
+                } else {
+                    println!("[REC START RESP] Successfully recovered keypair");
+                }
+            }
+            Err(decryption_err) => {
+                if let Err(e) = state.tauri_handle.clone().unwrap().emit(
+                    "recovery",
+                    TauriRecFinished {
+                        username: state.username.clone(),
+                        error: Some(decryption_err.to_string()),
+                    },
+                ) {
+                    println!(
+                        "[REC START RESP] Tauri could not emit recovery error: {:?}",
+                        e
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
