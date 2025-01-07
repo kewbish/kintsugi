@@ -270,7 +270,7 @@ enum KadRecordType {
     PeerId(PeerId),
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct EncryptedTauriNotepad {
     encrypted_contents: Vec<u8>,
     nonce: [u8; 12],
@@ -1281,13 +1281,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
         node_state.username = username.clone();
-        node_state.opaque_keypair = Keypair::new();
-        // TODO
-        /*save_local_envelope(
+        save_local_envelope(
             username.clone(),
             password.clone(),
             node_state.opaque_keypair.clone(),
-        )?;*/
+        )?;
 
         let tx_clone = state.1.clone();
         let username = node_state.username.clone();
