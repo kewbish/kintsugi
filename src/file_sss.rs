@@ -73,7 +73,6 @@ impl FileSSS {
         let (size, result_bytes) = result.split_at(std::mem::size_of::<usize>());
         let size: [u8; 8] = size.try_into().unwrap();
         let length = usize::from_le_bytes(size);
-        println!("{:?}", result_bytes.len());
 
         let mut result = Vec::from(result_bytes);
         result.truncate(length);

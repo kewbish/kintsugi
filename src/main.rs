@@ -12,7 +12,7 @@ mod signature;
 mod util;
 mod zkp;
 
-use acss::{ACSSDealerShare, ACSSInputs, ACSSNodeShare, ACSS};
+use acss::{ACSSDealerShare, ACSSNodeShare, ACSS};
 #[allow(unused_imports)]
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
@@ -76,7 +76,7 @@ struct NodeState {
     username_to_peer_id: HashMap<String, PeerId>,
     username_to_index: HashMap<String, i32>, // this node's recovery nodes' indices
     username_to_opaque_pkey: HashMap<String, PublicKey>,
-    acss_inputs: ACSSInputs,
+    h_point: RistrettoPoint,
     opaque_node: P2POpaqueNode,
     // the indices for nodes for which this node is a recovery node
     peer_recoveries: HashMap<String, (ACSSNodeShare, i32)>,
@@ -88,6 +88,7 @@ struct NodeState {
     kad_done: HashSet<QueryId>,
     waiting_for_peer_id: HashMap<String, Vec<RequestMessage>>,
     tauri_handle: Option<AppHandle>,
+    debug_evaluations: HashMap<Scalar, Scalar>,
 }
 
 #[serde_as]
@@ -103,7 +104,7 @@ struct BootstrapNodeState {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRegInitMessage {
-    inputs: ACSSInputs,
+    h_point: RistrettoPoint,
     reg_start_req: RegStartRequest,
     dealer_shares: HashMap<String, ACSSDealerShare>,
     dealer_key: PublicKey,
@@ -118,6 +119,7 @@ struct OPRFRegStartRespMessage {
     user_username: String,
     node_index: i32,
     node_username: String,
+    debug_share: Scalar,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -156,7 +158,7 @@ struct DPSSRefreshInitMessage {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct DPSSRefreshReshareMessage {
-    inputs: ACSSInputs,
+    h_point: RistrettoPoint,
     dealer_shares: HashMap<String, ACSSDealerShare>,
     dealer_shares_hat: HashMap<String, ACSSDealerShare>,
     commitments: HashMap<Scalar, RistrettoPoint>,
@@ -340,11 +342,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         username_to_peer_id: HashMap::new(),
         username_to_index: HashMap::new(), // temp
         username_to_opaque_pkey: HashMap::new(),
-        acss_inputs: ACSSInputs {
-            h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
-            degree: 1,
-            peer_public_keys: HashMap::new(),
-        },
+        h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
         opaque_node: P2POpaqueNode::new("".to_string()),
         peer_recoveries: HashMap::new(),
         phi_polynomials: None,
@@ -355,7 +353,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         kad_done: HashSet::new(),
         waiting_for_peer_id: HashMap::new(),
         tauri_handle: None,
+        debug_evaluations: HashMap::new(), // TODO
     };
+    state.opaque_node.keypair = state.opaque_keypair.clone();
     let mut is_bootstrap = false;
     let mut bootstrap_keypair: libp2p::identity::ed25519::Keypair =
         libp2p::identity::ed25519::Keypair::generate();
@@ -382,7 +382,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &mut state.libp2p_keypair_bytes.clone(),
             )
             .unwrap();
-            state.opaque_keypair = bootstrap_node_state.opaque_keypair;
+            state.opaque_keypair = bootstrap_node_state.opaque_keypair.clone();
+            state.opaque_node.keypair = bootstrap_node_state.opaque_keypair;
         } else {
             for i in 0..3 {
                 let libp2p_keypair = libp2p::identity::ed25519::Keypair::generate();
@@ -405,7 +406,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     state.peer_id = new_peer_id;
                     state.libp2p_keypair_bytes = libp2p_keypair.to_bytes();
                     bootstrap_keypair = libp2p_keypair;
-                    state.opaque_keypair = opaque_keypair;
+                    state.opaque_keypair = opaque_keypair.clone();
+                    state.opaque_node.keypair = opaque_keypair;
                 }
             }
         }
@@ -483,8 +485,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             state.opaque_node.id = username.clone();
             let pkey = state.opaque_keypair.public_key.clone();
             state.username_to_opaque_pkey.insert(username.clone(), pkey);
-
-            println!("[DEBUG] Updating username to {:?}", username.clone());
 
             let (_peer_id_kad_record, peer_id_record) = KadRecord::new(
                 RecordKey::new(&format!("/peer_id/{}", state.username)),
@@ -568,11 +568,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         msg: RequestMessage,
     ) {
         let destination_peer_id = state.username_to_peer_id.get(&username);
-        println!(
-            "[DEBUG] Sending to {:?}, peer ID {:?}",
-            username.clone(),
-            destination_peer_id
-        );
         match destination_peer_id {
             Some(peer) => {
                 swarm
@@ -603,7 +598,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
 
-        state.acss_inputs.peer_public_keys = recovery_addresses
+        let peer_public_keys = recovery_addresses
             .iter()
             .map(|(k, _)| {
                 (
@@ -612,14 +607,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
             })
             .collect();
-        state.acss_inputs.degree = threshold - 1;
 
         let s = Scalar::random(&mut OsRng);
         let (acss_dealer_shares, phi, phi_hat) = ACSS::share_dealer(
-            state.acss_inputs.clone(),
+            state.h_point,
             s,
             threshold - 1,
             state.opaque_keypair.private_key,
+            peer_public_keys,
+            recovery_addresses.clone(),
         )?;
         state.phi_polynomials = Some((phi, phi_hat));
         state.registration_received = Some(HashMap::new());
@@ -633,7 +629,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .insert(username.clone(), index.clone());
 
             let init_message = RequestMessage::OPRFRegInitMessage(OPRFRegInitMessage {
-                inputs: state.acss_inputs.clone(),
+                h_point: state.h_point,
                 reg_start_req: reg_start_req.clone(),
                 dealer_shares: acss_dealer_shares.clone(),
                 dealer_key: state.opaque_keypair.public_key,
@@ -664,7 +660,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         channel: ResponseChannel<ResponseMessage>,
     ) -> Result<(), Box<dyn Error>> {
         let node_share = ACSS::share(
-            message.inputs.clone(),
+            message.h_point,
             message
                 .dealer_shares
                 .get(&state.username.clone())
@@ -695,6 +691,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 user_username: message.user_username.clone(),
                 node_index: message.node_index,
                 node_username: state.username.clone(),
+                debug_share: node_share.s_i_d, // TODO
             });
 
         if let Err(e) = swarm
@@ -724,16 +721,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let mut s = state.registration_received.take().unwrap();
-        s.insert(message.node_username, message.reg_start_resp);
+        s.insert(message.node_username, message.reg_start_resp.clone());
+
+        state.debug_evaluations.insert(
+            i32_to_scalar(message.reg_start_resp.index),
+            message.debug_share,
+        );
 
         if s.len() < state.threshold {
             state.registration_received = Some(s);
             return Ok(());
         }
 
-        let reg_finish_reqs = state
-            .opaque_node
-            .local_registration_finish(s.values().map(|v| v.clone()).collect(), state.threshold)?;
+        let reg_finish_reqs = state.opaque_node.local_registration_finish(
+            s.values().map(|v| v.clone()).collect(),
+            state.threshold - 1,
+        )?;
         for reg_finish_req in reg_finish_reqs.iter() {
             let index = state
                 .username_to_index
@@ -789,12 +792,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fn handle_recovery_init(
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
-        username: String,
+        _username: String,
         password: String,
         recovery_addresses: HashMap<String, i32>,
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
-        state.username = username;
+
         state.recovery_received = Some(HashMap::new());
 
         let recovery_start_req = state.opaque_node.local_login_start(password)?;
@@ -881,7 +884,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let opaque_keypair = state
             .opaque_node
             .local_login_finish(s.values().map(|v| v.clone()).collect())?;
-        state.opaque_keypair = opaque_keypair;
+        state.opaque_keypair = opaque_keypair.clone();
+        state.opaque_node.keypair = opaque_keypair;
+
+        println!("[REC START RESP] Succesfully recovered keypair");
 
         Ok(())
     }
@@ -928,18 +934,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message: DPSSRefreshInitMessage,
     ) -> Result<(), Box<dyn Error>> {
         let (node_share, _) = state.peer_recoveries.get(&message.node_username).unwrap();
+
+        let peer_public_keys: HashMap<String, PublicKey> = message
+            .new_recovery_addresses
+            .iter()
+            .map(|(k, _)| {
+                (
+                    k.clone(),
+                    state.username_to_opaque_pkey.get(k).unwrap().clone(),
+                )
+            })
+            .collect();
         let (acss_dealer_share_s, _, _) = ACSS::share_dealer(
-            state.acss_inputs.clone(),
+            state.h_point,
             node_share.s_i_d,
             message.new_threshold - 1,
             state.opaque_keypair.private_key,
+            peer_public_keys.clone(),
+            message.new_recovery_addresses.clone(),
         )?;
 
         let (acss_dealer_share_s_hat, _, _) = ACSS::share_dealer(
-            state.acss_inputs.clone(),
+            state.h_point,
             node_share.s_hat_i_d,
             message.new_threshold - 1,
             state.opaque_keypair.private_key,
+            peer_public_keys,
+            message.new_recovery_addresses.clone(),
         )?;
 
         let old_commitments: HashMap<Scalar, RistrettoPoint> = state
@@ -951,7 +972,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         for (username, index) in message.new_recovery_addresses.iter() {
             let reshare_msg =
                 RequestMessage::DPSSRefreshReshareMessage(DPSSRefreshReshareMessage {
-                    inputs: state.acss_inputs.clone(),
+                    h_point: state.h_point,
                     dealer_shares: acss_dealer_share_s.clone(),
                     dealer_shares_hat: acss_dealer_share_s_hat.clone(),
                     dealer_key: state.opaque_keypair.private_key,
@@ -983,13 +1004,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message: DPSSRefreshReshareMessage,
     ) -> Result<(), Box<dyn Error>> {
         let node_share = ACSS::share(
-            message.inputs.clone(),
+            message.h_point,
             message.dealer_shares.get(&state.username).unwrap().clone(),
             state.opaque_keypair.clone(),
             message.dealer_key,
         )?;
         let node_share_hat = ACSS::share(
-            message.inputs.clone(),
+            message.h_point,
             message
                 .dealer_shares_hat
                 .get(&state.username)
@@ -1713,7 +1734,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes, threshold).unwrap();
                                 }
                                 TauriToRustCommand::RecoveryStart(username, password, recovery_nodes) => {
-                                    handle_username_update(state_arc.clone(), &mut swarm, username.clone()).unwrap();
                                     handle_recovery_init(state_arc.clone(), &mut swarm, username, password, recovery_nodes).unwrap();
                                 }
                                 TauriToRustCommand::RefreshStart(recovery_nodes, new_threshold) => {

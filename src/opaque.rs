@@ -208,6 +208,7 @@ impl P2POpaqueNode {
             .iter()
             .map(|resp| i32_to_scalar(resp.index))
             .collect();
+
         let ciphertext_shares =
             FileSSS::split(ciphertext.clone(), other_indices.clone(), threshold);
 

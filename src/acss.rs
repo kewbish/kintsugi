@@ -23,13 +23,6 @@ use crate::{
 pub struct ACSS {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ACSSInputs {
-    pub(crate) h_point: RistrettoPoint,
-    pub(crate) degree: usize,
-    pub(crate) peer_public_keys: HashMap<String, PublicKey>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ACSSDealerShare {
     pub(crate) index: usize,
     pub(crate) nonce: [u8; 12],
@@ -49,16 +42,20 @@ pub struct ACSSNodeShare {
 
 impl ACSS {
     pub fn share_dealer(
-        inputs: ACSSInputs,
+        h_point: RistrettoPoint,
         secret: Scalar,
         degree: usize,
         dealer_key: PrivateKey,
+        peer_public_keys: HashMap<String, PublicKey>,
+        peer_indexes: HashMap<String, i32>,
     ) -> Result<(HashMap<String, ACSSDealerShare>, Polynomial, Polynomial), P2POpaqueError> {
         let mut shares = HashMap::new();
         let phi = Polynomial::new_w_secret(degree, secret);
         let phi_hat = Polynomial::new(degree);
 
-        for (i, (peer_id, public_key)) in inputs.peer_public_keys.iter().enumerate() {
+        for (_, (peer_id, i)) in peer_indexes.iter().enumerate() {
+            let i = i.clone() as usize;
+            let public_key = peer_public_keys.get(peer_id).unwrap();
             let dealer_private_key_scalar = Scalar::from_bytes_mod_order(dealer_key);
             let peer_public_key_point = CompressedRistretto::from_slice(public_key);
             if let Err(e) = peer_public_key_point {
@@ -96,13 +93,13 @@ impl ACSS {
             }
             let v_hat_i = v_hat_i.unwrap();
 
-            let c_i = phi.at(i) * RISTRETTO_BASEPOINT_POINT + phi_hat.at(i) * inputs.h_point;
+            let c_i = phi.at(i) * RISTRETTO_BASEPOINT_POINT + phi_hat.at(i) * h_point;
             let poly_c_i = phi
                 .coeffs
                 .iter()
                 .map(|c| RISTRETTO_BASEPOINT_POINT * c)
                 .collect();
-            let proof = ZKP::new(phi.at(i), phi_hat.at(i), inputs.h_point, c_i);
+            let proof = ZKP::new(phi.at(i), phi_hat.at(i), h_point, c_i);
 
             shares.insert(
                 peer_id.clone(),
@@ -122,12 +119,12 @@ impl ACSS {
     }
 
     pub fn share(
-        inputs: ACSSInputs,
+        h_point: RistrettoPoint,
         share: ACSSDealerShare,
         keypair: Keypair,
         dealer_key: PublicKey,
     ) -> Result<ACSSNodeShare, P2POpaqueError> {
-        if !share.proof.verify(inputs.h_point, share.c_i) {
+        if !share.proof.verify(h_point, share.c_i) {
             return Err(P2POpaqueError::CryptoError(
                 "ZKP was not accepted".to_string(),
             ));
@@ -183,7 +180,7 @@ impl ACSS {
         let s_hat_i_d_bytes = s_hat_i_d_bytes.unwrap();
         let s_hat_i_d = Scalar::from_bytes_mod_order(s_hat_i_d_bytes);
 
-        let c_i = s_i_d * RISTRETTO_BASEPOINT_POINT + s_hat_i_d * inputs.h_point;
+        let c_i = s_i_d * RISTRETTO_BASEPOINT_POINT + s_hat_i_d * h_point;
 
         Ok(ACSSNodeShare {
             s_i_d,

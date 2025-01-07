@@ -12,7 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 const Recovery = () => {
   const navigate = useNavigate();
 
-  const [peers, setPeers] = useState<string[]>([]);
+  const [peers, setPeers] = useState<[string, number][]>([]);
   const [threshold, setThreshold] = useState<number>(0);
   const [selectedPeers, setSelectedPeers] = useState<boolean[]>([]);
   const [username, setUsername] = useState<string>("");
@@ -46,7 +46,7 @@ const Recovery = () => {
           if (e.payload.error !== null) {
             toast.error(e.payload.error);
           } else {
-            setPeers(Object.keys(e.payload.recovery_addresses).sort());
+            setPeers(Object.entries(e.payload.recovery_addresses).sort());
             setThreshold(e.payload.threshold);
           }
         }
@@ -64,22 +64,22 @@ const Recovery = () => {
 
   const startRecovery = async () => {
     let recoveryNodes = new Map();
-    let count = 1;
     for (const i in peers) {
       if (selectedPeers[i]) {
-        recoveryNodes.set(count, peers[i]);
-        count += 1;
+        recoveryNodes.set(peers[i][0], peers[i][1]);
       }
     }
+    console.log(recoveryNodes);
     invoke("local_recovery", { username, password, recoveryNodes })
       .then(() => {
-        invoke("tauri_save_local_envelope", { password })
+        /*invoke("tauri_save_local_envelope", { password })
           .then(() => {
             setIsLoggedIn(true); // if recovery was successful, can simply log in
             toast.success("Successfully recovered keypair");
             navigate("/");
           })
-          .catch((err) => toast.error(err));
+          .catch((err) => toast.error(err));*/
+        console.log("TODO");
       })
       .catch((err) => toast.error(err));
   };
@@ -96,7 +96,7 @@ const Recovery = () => {
       <Link to="/">&lt; back</Link>
       <h1>Request recovery from peers</h1>
       <div>
-        <form action="" style={{ display: "flex", flexFlow: "column nowrap" }}>
+        <div style={{ display: "flex", flexFlow: "column nowrap" }}>
           <label htmlFor="username">Username</label>
           <input
             type="text"
@@ -127,7 +127,7 @@ const Recovery = () => {
                         ? "var(--main-light)"
                         : "auto",
                     }}
-                    key={peer + selectedPeers[i]}
+                    key={peer[0] + selectedPeers[i]}
                     onClick={() => {
                       setSelectedPeers((currentSelected) => {
                         let newSelected = currentSelected.slice();
@@ -136,7 +136,7 @@ const Recovery = () => {
                       });
                     }}
                   >
-                    <User user={peer} />
+                    <User user={peer[0]} />
                   </div>
                 ))}
                 <p>Select at least {threshold} recovery nodes to recover.</p>
@@ -174,7 +174,7 @@ const Recovery = () => {
               Done
             </button>
           </div>
-        </form>
+        </div>
       </div>
     </div>
   );
