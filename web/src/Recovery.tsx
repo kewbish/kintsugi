@@ -93,7 +93,7 @@ const Recovery = () => {
             invoke("tauri_save_local_envelope", { password })
               .then(() => {
                 setIsLoggedIn(true); // if recovery was successful, can simply log in
-                toast.success("Successfully recovered keypair");
+                toast.success("Successfully recovered keypair!");
                 navigate("/");
               })
               .catch((err) => toast.error(err));

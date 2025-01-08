@@ -225,6 +225,9 @@ struct TauriRecFinished {
     error: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct TauriRefrFinished {}
+
 /*#[derive(Clone, Debug, Eq, PartialEq)]
 struct HashedKadRecord(Record);
 
@@ -1060,11 +1063,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             println!(
-                "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at {}, index {} (waiting for: {:?})",
+                "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at {}, index {}",
                 state.username,
                 username.clone(),
                 index,
-                state.waiting_for_peer_id
             );
         }
 
@@ -1183,6 +1185,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         state.threshold = message.new_threshold;
         state.username_to_index = message.new_recovery_addresses;
+
+        if let Err(e) = state
+            .tauri_handle
+            .clone()
+            .unwrap()
+            .emit("refresh", TauriRefrFinished {})
+        {
+            println!("[DPSS COMP] Tauri could not emit refresh complete: {:?}", e);
+        } else {
+            println!("[DPSS COMP] Successfully refreshed shares");
+        }
+
         Ok(true)
     }
 

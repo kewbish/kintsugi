@@ -4,6 +4,7 @@ import toast from "react-hot-toast";
 import { Link } from "react-router-dom";
 import User from "./components/User";
 import Skeleton from "react-loading-skeleton";
+import { listen } from "@tauri-apps/api/event";
 
 const ContactSelection = () => {
   const [peers, setPeers] = useState<string[]>([]);
@@ -24,7 +25,7 @@ const ContactSelection = () => {
       .catch((err) => toast.error(err));
   }, []);
 
-  const startRecovery = (peers: string[], threshold: number) => {
+  const startRefresh = (peers: string[], threshold: number) => {
     let newRecoveryAddresses = new Map();
     for (const [i, address] of peers.entries()) {
       newRecoveryAddresses.set(address, i + 1);
@@ -32,14 +33,29 @@ const ContactSelection = () => {
     invoke("local_refresh", {
       newRecoveryAddresses,
       newThreshold: threshold,
-    })
-      .then((_) => {
-        // toast.success("Successfully updated!"); // TODO - Tauri event
-      })
-      .catch((err) => {
-        toast.error(err);
-      });
+    }).catch((err) => {
+      toast.error(err);
+    });
   };
+
+  type TauriRefreshFinished = {
+    username: string;
+    error: string | null;
+  };
+
+  useEffect(() => {
+    const registerListener = async () => {
+      const unlisten = await listen<TauriRefreshFinished>("refresh", (_) => {
+        toast.success("Updated recovery configuration!");
+      });
+      return unlisten;
+    };
+
+    const unlisten = registerListener();
+    return () => {
+      unlisten.then((fn) => fn && fn());
+    };
+  }, []);
 
   return (
     <div
@@ -66,7 +82,7 @@ const ContactSelection = () => {
                         let newPeers = currentPeers.filter(
                           (_, index) => index != i
                         );
-                        startRecovery(newPeers, threshold);
+                        startRefresh(newPeers, threshold);
                         return newPeers;
                       });
                     }}
@@ -99,7 +115,7 @@ const ContactSelection = () => {
           onClick={() => {
             setPeers((currentPeers) => {
               let newPeers = [...currentPeers, currentInput];
-              startRecovery(newPeers, threshold);
+              startRefresh(newPeers, threshold);
               return newPeers;
             });
             setCurrentInput("");
@@ -121,7 +137,7 @@ const ContactSelection = () => {
           />
           <button
             style={{ marginRight: 0 }}
-            onClick={() => startRecovery(peers, threshold)}
+            onClick={() => startRefresh(peers, threshold)}
           >
             Update threshold
           </button>
