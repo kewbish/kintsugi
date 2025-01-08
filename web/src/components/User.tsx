@@ -16,15 +16,15 @@ const User = ({ user, actions }: { user: string; actions?: ReactElement }) => (
     <div style={{ minWidth: 0 }}>
       <p
         style={{
-          marginBottom: "0.5em",
+          marginBottom: "0em",
           whiteSpace: "nowrap",
           textOverflow: "ellipsis",
           overflow: "hidden",
         }}
       >
         <b>{user}</b>
-        {!!actions ? actions : null}
       </p>
+      {!!actions ? actions : null}
     </div>
   </div>
 );

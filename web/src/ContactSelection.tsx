@@ -3,18 +3,18 @@ import { useState, useEffect } from "react";
 import toast from "react-hot-toast";
 import { Link } from "react-router-dom";
 import User from "./components/User";
+import Skeleton from "react-loading-skeleton";
 
 const ContactSelection = () => {
   const [peers, setPeers] = useState<string[]>([]);
   const [currentInput, setCurrentInput] = useState("");
   const [threshold, setThreshold] = useState(3);
-  const [confirmedThreshold, setConfirmedThreshold] = useState(threshold);
   const [hasLoaded, setHasLoaded] = useState(false);
 
   useEffect(() => {
     invoke("get_peers")
       .then((resp) => {
-        setPeers(resp as string[]);
+        setPeers((resp as string[]).sort());
         setHasLoaded(true);
       })
       .catch((err) => toast.error(err));
@@ -24,24 +24,22 @@ const ContactSelection = () => {
       .catch((err) => toast.error(err));
   }, []);
 
-  useEffect(() => {
-    if (hasLoaded) {
-      let newRecoveryAddresses = new Map();
-      for (const [i, address] of peers.entries()) {
-        newRecoveryAddresses.set(address, i + 1);
-      }
-      invoke("local_refresh", {
-        newRecoveryAddresses,
-        newThreshold: confirmedThreshold - 1,
-      })
-        .then((_) => {
-          toast.success("Successfully updated!");
-        })
-        .catch((err) => {
-          toast.error(err);
-        });
+  const startRecovery = (peers: string[], threshold: number) => {
+    let newRecoveryAddresses = new Map();
+    for (const [i, address] of peers.entries()) {
+      newRecoveryAddresses.set(address, i + 1);
     }
-  }, [peers, confirmedThreshold]);
+    invoke("local_refresh", {
+      newRecoveryAddresses,
+      newThreshold: threshold,
+    })
+      .then((_) => {
+        // toast.success("Successfully updated!"); // TODO - Tauri event
+      })
+      .catch((err) => {
+        toast.error(err);
+      });
+  };
 
   return (
     <div
@@ -55,27 +53,40 @@ const ContactSelection = () => {
     >
       <Link to="/">&lt; back</Link>
       <h1>Recovery contacts</h1>
-      {peers.map((peer, i) => (
-        <div key={peer}>
-          <User
-            user={peer}
-            actions={
-              <div style={{ paddingTop: ".5em" }}>
-                <button
-                  onClick={() => {
-                    setPeers((currentPeers) =>
-                      currentPeers.filter((_, index) => index != i)
-                    );
-                  }}
-                >
-                  Remove contact
-                </button>
-              </div>
-            }
-          />
-          {i != peers.length - 1 ? <hr style={{ marginTop: "1em" }} /> : null}
-        </div>
-      ))}
+      {hasLoaded ? (
+        peers.map((peer, i) => (
+          <div key={peer}>
+            <User
+              user={peer}
+              actions={
+                <div style={{ paddingTop: ".5em" }}>
+                  <button
+                    onClick={() => {
+                      setPeers((currentPeers) => {
+                        let newPeers = currentPeers.filter(
+                          (_, index) => index != i
+                        );
+                        startRecovery(newPeers, threshold);
+                        return newPeers;
+                      });
+                    }}
+                  >
+                    Remove contact
+                  </button>
+                </div>
+              }
+            />
+            {i != peers.length - 1 ? <hr style={{ marginTop: "1em" }} /> : null}
+          </div>
+        ))
+      ) : (
+        <Skeleton
+          height={136}
+          baseColor={"var(--background)"}
+          highlightColor={"var(--main-light)"}
+          borderRadius={"1em"}
+        />
+      )}
       <div style={{ display: "flex", marginTop: "1em" }}>
         <input
           type="text"
@@ -87,7 +98,9 @@ const ContactSelection = () => {
           style={{ marginRight: 0 }}
           onClick={() => {
             setPeers((currentPeers) => {
-              return [...currentPeers, currentInput];
+              let newPeers = [...currentPeers, currentInput];
+              startRecovery(newPeers, threshold);
+              return newPeers;
             });
             setCurrentInput("");
           }}
@@ -108,7 +121,7 @@ const ContactSelection = () => {
           />
           <button
             style={{ marginRight: 0 }}
-            onClick={() => setConfirmedThreshold(threshold)}
+            onClick={() => startRecovery(peers, threshold)}
           >
             Update threshold
           </button>

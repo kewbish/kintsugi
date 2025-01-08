@@ -1,7 +1,5 @@
-use crate::file_sss::FileSSS;
 use crate::keypair::{Keypair, PublicKey};
 use crate::oprf::{OPRFClient, OPRFServer};
-use crate::polynomial::get_lagrange_coefficient;
 use crate::signature::Signature;
 use crate::util::i32_to_scalar;
 #[allow(unused_imports)]
@@ -89,6 +87,7 @@ impl P2POpaqueNode {
     pub fn peer_registration_start(
         &mut self,
         peer_req: RegStartRequest,
+        s_i_d: Scalar,
         index: i32,
         other_indices: HashSet<i32>,
     ) -> Result<RegStartResponse, P2POpaqueError> {
@@ -103,15 +102,9 @@ impl P2POpaqueNode {
         }
         self.peer_attempted_public_keys
             .insert(peer_req.user_username, peer_req.peer_public_key);
-        let private_key = Scalar::from_canonical_bytes(opaque_keypair.private_key).into_option();
-        if let None = private_key {
-            return Err(P2POpaqueError::CryptoError(
-                "Could not deserialize private key".to_string(),
-            ));
-        }
         let password_blind_eval = OPRFServer::blind_evaluate(
             peer_req.blinded_pwd,
-            private_key.unwrap(),
+            s_i_d,
             i32_to_scalar(index),
             other_indices
                 .iter()
@@ -133,7 +126,7 @@ pub struct RegFinishRequest {
     pub(crate) user_username: String,
     pub(crate) node_username: String,
     pub(crate) nonce: [u8; 12],
-    pub(crate) encrypted_envelope_share: Vec<u8>,
+    pub(crate) encrypted_envelope: Vec<u8>,
     pub(crate) signature: Signature,
 }
 
@@ -145,7 +138,7 @@ pub struct Envelope {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct EncryptedEnvelope {
     pub(crate) public_key: Option<PublicKey>,
-    pub(crate) encrypted_envelope_share: Vec<u8>,
+    pub(crate) encrypted_envelope: Vec<u8>,
     pub(crate) nonce: [u8; 12],
 }
 
@@ -153,24 +146,13 @@ impl P2POpaqueNode {
     pub fn local_registration_finish(
         &mut self,
         peer_resps: Vec<RegStartResponse>,
-        threshold: usize,
     ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
         if let None = self.oprf_client {
             return Err(P2POpaqueError::CryptoError(
                 "OPRF client not initialized".to_string(),
             ));
         }
-        let all_indices: HashSet<Scalar> = peer_resps
-            .iter()
-            .map(|resp| i32_to_scalar(resp.index.clone()))
-            .collect();
-        let combined_rwd = peer_resps
-            .iter()
-            .map(|resp| {
-                get_lagrange_coefficient(i32_to_scalar(resp.index.clone()), all_indices.clone())
-                    * resp.rwd
-            })
-            .sum();
+        let combined_rwd = peer_resps.iter().map(|resp| resp.rwd.clone()).sum();
         let oprf_client = self.oprf_client.as_ref().unwrap();
         let unblinded_rwd = oprf_client.unblind(combined_rwd);
         if let Err(e) = unblinded_rwd {
@@ -203,36 +185,16 @@ impl P2POpaqueNode {
             ));
         }
         let ciphertext = ciphertext.unwrap();
-
-        let other_indices: HashSet<Scalar> = peer_resps
-            .iter()
-            .map(|resp| i32_to_scalar(resp.index))
-            .collect();
-
-        let ciphertext_shares =
-            FileSSS::split(ciphertext.clone(), other_indices.clone(), threshold);
+        let signature = Signature::new_with_keypair(&ciphertext, self.keypair.clone());
 
         for peer_resp in peer_resps.iter() {
-            let share_serialized = serde_json::to_vec(
-                &ciphertext_shares
-                    .get(&i32_to_scalar(peer_resp.index))
-                    .unwrap(),
-            );
-            if let Err(e) = share_serialized {
-                return Err(P2POpaqueError::SerializationError(
-                    "JSON serialization of envelope share failed: ".to_string() + &e.to_string(),
-                ));
-            }
-            let share_serialized = share_serialized.unwrap();
-            let signature = Signature::new_with_keypair(&share_serialized, self.keypair.clone());
-
             result.push(RegFinishRequest {
                 user_username: self.id.clone(),
                 node_username: peer_resp.node_username.clone(),
                 peer_public_key: self.keypair.public_key,
-                encrypted_envelope_share: share_serialized,
+                encrypted_envelope: ciphertext.clone(),
                 nonce: nonce_bytes,
-                signature,
+                signature: signature.clone(),
             })
         }
 
@@ -251,7 +213,7 @@ impl P2POpaqueNode {
             return Ok(());
         }
         if !peer_req.signature.verify(
-            &peer_req.encrypted_envelope_share,
+            &peer_req.encrypted_envelope,
             peer_public_key.unwrap().clone(),
         ) {
             return Err(P2POpaqueError::CryptoError(
@@ -262,7 +224,7 @@ impl P2POpaqueNode {
             peer_req.user_username,
             EncryptedEnvelope {
                 public_key: Some(peer_req.peer_public_key),
-                encrypted_envelope_share: peer_req.encrypted_envelope_share,
+                encrypted_envelope: peer_req.encrypted_envelope,
                 nonce: peer_req.nonce,
             },
         );
@@ -304,6 +266,7 @@ impl P2POpaqueNode {
     pub fn peer_login_start(
         &self,
         peer_req: LoginStartRequest,
+        s_i_d: Scalar,
         index: i32,
         other_indices: HashSet<i32>,
     ) -> Result<LoginStartResponse, P2POpaqueError> {
@@ -315,11 +278,9 @@ impl P2POpaqueNode {
         if let None = envelope {
             return Err(P2POpaqueError::RegistrationError);
         }
-        let private_key =
-            Scalar::from_canonical_bytes(local_opaque_keypair.unwrap().private_key).into_option();
         let password_blind_eval = OPRFServer::blind_evaluate(
             peer_req.blinded_pwd,
-            private_key.unwrap(),
+            s_i_d,
             i32_to_scalar(index),
             other_indices
                 .iter()
@@ -346,17 +307,7 @@ impl P2POpaqueNode {
                 "OPRF client not initialized".to_string(),
             ));
         }
-        let all_indices: HashSet<Scalar> = peer_resps
-            .iter()
-            .map(|resp| i32_to_scalar(resp.index.clone()))
-            .collect();
-        let combined_rwd = peer_resps
-            .iter()
-            .map(|resp| {
-                get_lagrange_coefficient(i32_to_scalar(resp.index.clone()), all_indices.clone())
-                    * resp.rwd
-            })
-            .sum();
+        let combined_rwd = peer_resps.iter().map(|resp| resp.rwd.clone()).sum();
         let oprf_client = self.oprf_client.as_ref().unwrap();
         let unblinded_rwd = oprf_client.unblind(combined_rwd);
         if let Err(e) = unblinded_rwd {
@@ -372,22 +323,8 @@ impl P2POpaqueNode {
         let nonce_bytes = peer_resps[0].envelope.nonce;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let mut encrypted_envelope_shares: HashMap<Scalar, Vec<Scalar>> = HashMap::new();
-        for peer_resp in peer_resps.iter() {
-            let deserialized_share: Result<Vec<Scalar>, _> =
-                serde_json::from_slice(peer_resp.envelope.encrypted_envelope_share.as_slice());
-            if let Err(e) = deserialized_share {
-                return Err(P2POpaqueError::SerializationError(
-                    "JSON deserialization of envelope share failed: ".to_string() + &e.to_string(),
-                ));
-            }
-            let deserialized_share = deserialized_share.unwrap();
-            encrypted_envelope_shares.insert(i32_to_scalar(peer_resp.index), deserialized_share);
-        }
-
-        let ciphertext_recombined = FileSSS::reconstruct(encrypted_envelope_shares);
-
-        let plaintext_bytes = cipher.decrypt(nonce, ciphertext_recombined.as_slice());
+        let plaintext_bytes =
+            cipher.decrypt(nonce, peer_resps[0].envelope.encrypted_envelope.as_ref());
         if let Err(e) = plaintext_bytes {
             return Err(P2POpaqueError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),

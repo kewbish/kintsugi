@@ -1,3 +1,8 @@
+// NOTE: the SSS of the encrypted envelope is no longer being used
+// this would have required re-splitting the shares upon each DPSS refresh, which is feasible but
+// not strictly necessary for the security of this protocol
+#![allow(dead_code, unused_imports)]
+
 use std::collections::{HashMap, HashSet};
 
 use curve25519_dalek::Scalar;

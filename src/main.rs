@@ -83,7 +83,8 @@ struct NodeState {
     phi_polynomials: Option<(Polynomial, Polynomial)>,
     registration_received: Option<HashMap<String, RegStartResponse>>,
     recovery_received: Option<HashMap<String, LoginStartResponse>>,
-    reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare)>>,
+    reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare, i32, RistrettoPoint)>>,
+    reshare_complete_received: Option<HashSet<String>>,
     kad_filtering: HashMap<QueryId, Record>,
     kad_done: HashSet<QueryId>,
     waiting_for_peer_id: HashMap<String, Vec<RequestMessage>>,
@@ -149,6 +150,7 @@ struct OPRFRecoveryStartRespMessage {
 struct DPSSRefreshInitMessage {
     new_recovery_addresses: HashMap<String, i32>,
     new_threshold: usize,
+    old_threshold: usize,
     user_username: String,
     node_index: i32,
     node_username: String,
@@ -159,11 +161,22 @@ struct DPSSRefreshReshareMessage {
     h_point: RistrettoPoint,
     dealer_shares: HashMap<String, ACSSDealerShare>,
     dealer_shares_hat: HashMap<String, ACSSDealerShare>,
-    commitments: HashMap<Scalar, RistrettoPoint>,
+    old_commitment: RistrettoPoint,
+    new_recovery_addresses: HashMap<String, i32>,
     dealer_key: PublicKey,
     new_threshold: usize,
+    old_threshold: usize,
     user_username: String,
+    from_index: i32,
     node_index: i32,
+    node_username: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct DPSSRefreshCompleteMessage {
+    new_threshold: usize,
+    new_recovery_addresses: HashMap<String, i32>,
+    user_username: String,
     node_username: String,
 }
 
@@ -174,6 +187,7 @@ enum RequestMessage {
     OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage),
     DPSSRefreshInitMessage(DPSSRefreshInitMessage),
     DPSSRefreshReshareMessage(DPSSRefreshReshareMessage),
+    DPSSRefreshCompleteMessage(DPSSRefreshCompleteMessage),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -353,6 +367,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         registration_received: None,
         recovery_received: None,
         reshare_received: None,
+        reshare_complete_received: None,
         kad_filtering: HashMap::new(),
         kad_done: HashSet::new(),
         waiting_for_peer_id: HashMap::new(),
@@ -386,7 +401,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             )
             .unwrap();
             state.opaque_keypair = bootstrap_node_state.opaque_keypair.clone();
-            state.opaque_node.keypair = bootstrap_node_state.opaque_keypair;
+            state.opaque_node.keypair = bootstrap_node_state.opaque_keypair.clone();
+            state
+                .username_to_peer_id
+                .insert(state.username.clone(), bootstrap_node_state.peer_id.clone());
+            state.username_to_opaque_pkey.insert(
+                state.username.clone(),
+                bootstrap_node_state.opaque_keypair.clone().public_key,
+            );
         } else {
             for i in 0..3 {
                 let libp2p_keypair = libp2p::identity::ed25519::Keypair::generate();
@@ -406,11 +428,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 if i == 0 {
                     state.username = format!("bootstrap{i}");
-                    state.peer_id = new_peer_id;
+                    state.peer_id = new_peer_id.clone();
                     state.libp2p_keypair_bytes = libp2p_keypair.to_bytes();
                     bootstrap_keypair = libp2p_keypair;
                     state.opaque_keypair = opaque_keypair.clone();
-                    state.opaque_node.keypair = opaque_keypair;
+                    state.opaque_node.keypair = opaque_keypair.clone();
+                    state
+                        .username_to_peer_id
+                        .insert(state.username.clone(), new_peer_id);
+                    state
+                        .username_to_opaque_pkey
+                        .insert(state.username.clone(), opaque_keypair.public_key);
                 }
             }
         }
@@ -452,8 +480,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_message_dpss_init(&mut state, swarm, peer_id, msg)
             }
             RequestMessage::DPSSRefreshReshareMessage(msg) => {
-                handle_message_dpss_reshare(&mut state, swarm, peer_id, msg)?;
-                update_recovery_addrs(state_arc.clone(), swarm)
+                handle_message_dpss_reshare(&mut state, swarm, peer_id, msg)
+            }
+            RequestMessage::DPSSRefreshCompleteMessage(msg) => {
+                let res = handle_message_dpss_complete(&mut state, swarm, peer_id, msg)?;
+                if res {
+                    std::mem::drop(state);
+                    update_recovery_addrs(state_arc.clone(), swarm)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -674,17 +710,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
 
         state.peer_recoveries.insert(
-            message.node_username,
+            message.user_username.clone(),
             (node_share.clone(), message.node_index),
         );
 
-        let other_indices = message
+        let other_indices: HashSet<i32> = message
             .dealer_shares
             .values()
             .map(|share| share.index.try_into().unwrap())
             .collect();
         let reg_start_resp = state.opaque_node.peer_registration_start(
             message.reg_start_req,
+            node_share.s_i_d,
             message.node_index,
             other_indices,
         )?;
@@ -730,10 +767,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
 
-        let reg_finish_reqs = state.opaque_node.local_registration_finish(
-            s.values().map(|v| v.clone()).collect(),
-            state.threshold - 1,
-        )?;
+        let reg_finish_reqs = state
+            .opaque_node
+            .local_registration_finish(s.values().map(|v| v.clone()).collect())?;
         for reg_finish_req in reg_finish_reqs.iter() {
             let index = state
                 .username_to_index
@@ -831,8 +867,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message: OPRFRecoveryStartReqMessage,
         channel: ResponseChannel<ResponseMessage>,
     ) -> Result<(), Box<dyn Error>> {
+        let (node_share, _) = state.peer_recoveries.get(&message.user_username).unwrap();
         let rec_start_resp = state.opaque_node.peer_login_start(
             message.recovery_start_req,
+            node_share.s_i_d,
             message.node_index,
             message.other_indices,
         )?;
@@ -924,7 +962,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         new_threshold: usize,
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
-        if new_threshold + 1 > new_recovery_addresses.len() {
+        if new_threshold > new_recovery_addresses.len() {
             return Err(Box::from(
                 "Not enough recovery addresses for this threshold",
             ));
@@ -935,6 +973,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let init_message = RequestMessage::DPSSRefreshInitMessage(DPSSRefreshInitMessage {
                 new_recovery_addresses: new_recovery_addresses.clone(),
                 new_threshold,
+                old_threshold: state.threshold,
                 user_username: state.username.clone(),
                 node_index: index.clone(),
                 node_username: username.clone(),
@@ -947,8 +986,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
         }
 
-        state.username_to_index = new_recovery_addresses;
-
         Ok(())
     }
 
@@ -958,7 +995,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _peer_id: PeerId,
         message: DPSSRefreshInitMessage,
     ) -> Result<(), Box<dyn Error>> {
-        let (node_share, _) = state.peer_recoveries.get(&message.node_username).unwrap();
+        let (node_share, _) = state.peer_recoveries.get(&message.user_username).unwrap();
 
         let peer_public_keys: HashMap<String, PublicKey> = message
             .new_recovery_addresses
@@ -970,6 +1007,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
             })
             .collect();
+
         let (acss_dealer_share_s, _, _) = ACSS::share_dealer(
             state.h_point,
             node_share.s_i_d,
@@ -988,30 +1026,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
             message.new_recovery_addresses.clone(),
         )?;
 
-        let old_commitments: HashMap<Scalar, RistrettoPoint> = state
+        let old_commitment = state
             .peer_recoveries
-            .iter()
-            .map(|(_, v)| (i32_to_scalar(v.1), v.0.c_i.clone()))
-            .collect();
+            .get(&message.user_username)
+            .unwrap()
+            .0
+            .c_i;
 
         for (username, index) in message.new_recovery_addresses.iter() {
-            let reshare_msg =
-                RequestMessage::DPSSRefreshReshareMessage(DPSSRefreshReshareMessage {
-                    h_point: state.h_point,
-                    dealer_shares: acss_dealer_share_s.clone(),
-                    dealer_shares_hat: acss_dealer_share_s_hat.clone(),
-                    dealer_key: state.opaque_keypair.private_key,
-                    new_threshold: message.new_threshold,
-                    commitments: old_commitments.clone(),
-                    user_username: state.username.clone(),
-                    node_index: index.clone(),
-                    node_username: username.clone(),
-                });
+            let reshare_msg = DPSSRefreshReshareMessage {
+                h_point: state.h_point,
+                dealer_shares: acss_dealer_share_s.clone(),
+                dealer_shares_hat: acss_dealer_share_s_hat.clone(),
+                dealer_key: state.opaque_keypair.public_key,
+                new_recovery_addresses: message.new_recovery_addresses.clone(),
+                new_threshold: message.new_threshold,
+                old_threshold: message.old_threshold,
+                old_commitment,
+                user_username: message.user_username.clone(),
+                from_index: message.node_index.clone(),
+                node_index: index.clone(),
+                node_username: state.username.clone(),
+            };
+            if username.clone() == state.username {
+                if let Err(e) =
+                    handle_message_dpss_reshare(state, swarm, state.peer_id, reshare_msg)
+                {
+                    println!("[DPSS REFR INIT] To self failed with error {:?}", e);
+                }
+            } else {
+                let reshare_msg_wrapped = RequestMessage::DPSSRefreshReshareMessage(reshare_msg);
+                send_request_msg(swarm, state, username.clone(), reshare_msg_wrapped);
+            }
 
-            send_request_msg(swarm, state, username.clone(), reshare_msg);
             println!(
-                "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at index {}",
-                state.username, index
+                "[DPSS REFR INIT] Sending initial ACSS reshares for user {} at {}, index {} (waiting for: {:?})",
+                state.username,
+                username.clone(),
+                index,
+                state.waiting_for_peer_id
             );
         }
 
@@ -1024,7 +1077,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     fn handle_message_dpss_reshare(
         state: &mut NodeState,
-        _swarm: &mut Swarm<P2PBehaviour>,
+        swarm: &mut Swarm<P2PBehaviour>,
         _peer_id: PeerId,
         message: DPSSRefreshReshareMessage,
     ) -> Result<(), Box<dyn Error>> {
@@ -1045,48 +1098,92 @@ async fn main() -> Result<(), Box<dyn Error>> {
             message.dealer_key,
         )?;
 
-        let mut s: HashMap<String, (ACSSNodeShare, ACSSNodeShare)>;
+        let mut s: HashMap<String, (ACSSNodeShare, ACSSNodeShare, i32, RistrettoPoint)>;
         if let None = state.reshare_received {
             s = HashMap::new();
         } else {
             s = state.reshare_received.take().unwrap();
         }
 
-        s.insert(message.node_username.clone(), (node_share, node_share_hat));
+        s.insert(
+            message.node_username.clone(),
+            (
+                node_share,
+                node_share_hat,
+                message.from_index,
+                message.old_commitment,
+            ),
+        );
 
-        if s.len() < state.threshold {
+        if s.len() < message.old_threshold {
             state.reshare_received = Some(s);
             return Ok(());
         }
 
         let evaluations: HashMap<Scalar, Scalar> = s
             .iter()
-            .map(|(_, v)| (i32_to_scalar(message.node_index), v.0.s_i_d))
+            .map(|(_, v)| (i32_to_scalar(v.2), v.0.s_i_d))
             .collect();
         let evaluations_hat: HashMap<Scalar, Scalar> = s
             .iter()
-            .map(|(_, v)| (i32_to_scalar(message.node_index), v.1.s_i_d))
+            .map(|(_, v)| (i32_to_scalar(v.2), v.1.s_i_d))
             .collect();
+        let commitments: HashMap<Scalar, RistrettoPoint> =
+            s.iter().map(|(_, v)| (i32_to_scalar(v.2), v.3)).collect();
         let (s_i_d_prime, s_hat_i_d_prime, new_commitments) =
-            DPSS::reshare_w_evals(evaluations, evaluations_hat, message.commitments)?;
+            DPSS::reshare_w_evals(evaluations, evaluations_hat, commitments)?;
         let commitment_i = new_commitments
             .get(&i32_to_scalar(message.node_index))
             .unwrap();
 
         state.peer_recoveries.insert(
-            message.node_username,
+            message.user_username.clone(),
             (
                 ACSSNodeShare {
-                    s_i_d: s_i_d_prime,
+                    s_i_d: s_i_d_prime.clone(),
                     s_hat_i_d: s_hat_i_d_prime,
                     c_i: commitment_i.clone(),
                 },
                 message.node_index,
             ),
         );
-        state.threshold = message.new_threshold;
+
+        let complete_msg = RequestMessage::DPSSRefreshCompleteMessage(DPSSRefreshCompleteMessage {
+            new_threshold: message.new_threshold,
+            new_recovery_addresses: message.new_recovery_addresses,
+            user_username: message.user_username.clone(),
+            node_username: state.username.clone(),
+        });
+        send_request_msg(swarm, state, message.user_username, complete_msg);
+
+        println!("[DPSS RESH] Successfully refreshed secret shares");
 
         Ok(())
+    }
+
+    fn handle_message_dpss_complete(
+        state: &mut NodeState,
+        _swarm: &mut Swarm<P2PBehaviour>,
+        _peer_id: PeerId,
+        message: DPSSRefreshCompleteMessage,
+    ) -> Result<bool, Box<dyn Error>> {
+        let mut s: HashSet<String>;
+        if let None = state.reshare_complete_received {
+            s = HashSet::new();
+        } else {
+            s = state.reshare_complete_received.take().unwrap();
+        }
+
+        s.insert(message.node_username.clone());
+
+        if s.len() < message.new_threshold {
+            state.reshare_complete_received = Some(s);
+            return Ok(false);
+        }
+
+        state.threshold = message.new_threshold;
+        state.username_to_index = message.new_recovery_addresses;
+        Ok(true)
     }
 
     fn update_recovery_addrs_local(state: &mut NodeState) -> Result<(), Box<dyn Error>> {
@@ -1204,7 +1301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[tauri::command]
     fn get_peers(state: State<TauriState>) -> Vec<String> {
         let node_state = state.0.lock().unwrap();
-        return Vec::from_iter(node_state.username_to_peer_id.keys().map(|v| v.to_string()));
+        return Vec::from_iter(node_state.username_to_index.keys().map(|v| v.to_string()));
     }
 
     #[tauri::command]
@@ -1816,6 +1913,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         handle_response(state_arc.clone(), &mut swarm, peer, response).unwrap();
                                     }
                                 },
+                                SwarmEvent::Behaviour(P2PBehaviourEvent::RequestResponse(
+                                    request_response::Event::OutboundFailure { peer, request_id, error },
+                                )) => {
+                                    println!("[LOCAL] RR Outbound failure {:?} {:?} {:?}", peer,request_id, error);
+                                }
+                                SwarmEvent::Behaviour(P2PBehaviourEvent::RequestResponse(
+                                    request_response::Event::InboundFailure { peer, request_id, error },
+                                )) => {
+                                    println!("[LOCAL] RR Inbound failure {:?} {:?} {:?}", peer,request_id, error);
+                                }
                                 SwarmEvent::NewListenAddr { address, .. } => {
                                     println!("[LOCAL] Node peer ID: {address}");
                                 },

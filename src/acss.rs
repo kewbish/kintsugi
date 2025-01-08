@@ -140,7 +140,7 @@ impl ACSS {
         let dealer_public_key_point = dealer_public_key_point.unwrap().decompress();
         if let None = dealer_public_key_point {
             return Err(P2POpaqueError::SerializationError(
-                "Error deserializing public key".to_string(),
+                "Error decompressing public key".to_string(),
             ));
         }
         let shared_secret = private_key_scalar * dealer_public_key_point.unwrap();
