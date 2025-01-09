@@ -80,6 +80,7 @@ struct NodeState {
     // the indices for nodes for which this node is a recovery node
     peer_recoveries: HashMap<String, (ACSSNodeShare, i32)>,
     registration_received: Option<HashMap<String, RegStartResponse>>,
+    recovery_expecting: Option<usize>,
     recovery_received: Option<HashMap<String, LoginStartResponse>>,
     reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare, i32, RistrettoPoint)>>,
     reshare_complete_received: Option<HashSet<String>>,
@@ -365,6 +366,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         opaque_node: P2POpaqueNode::new("".to_string()),
         peer_recoveries: HashMap::new(),
         registration_received: None,
+        recovery_expecting: None,
         recovery_received: None,
         reshare_received: None,
         reshare_complete_received: None,
@@ -654,13 +656,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         state.registration_received = Some(HashMap::new());
 
-        let reg_start_req = state.opaque_node.local_registration_start(password)?;
-
         state.threshold = threshold;
         for (username, index) in recovery_addresses.iter() {
             state
                 .username_to_index
                 .insert(username.clone(), index.clone());
+
+            let reg_start_req = state
+                .opaque_node
+                .local_registration_start(password.clone(), username.clone())?;
 
             let init_message = RequestMessage::OPRFRegInitMessage(OPRFRegInitMessage {
                 h_point: state.h_point,
@@ -827,15 +831,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
 
         state.recovery_received = Some(HashMap::new());
-
-        let recovery_start_req = state.opaque_node.local_login_start(password)?;
+        state.recovery_expecting = Some(recovery_addresses.len());
 
         let other_indices: HashSet<i32> = recovery_addresses
             .clone()
             .values()
             .map(|v| v.clone())
             .collect();
+
         for (username, index) in recovery_addresses.iter() {
+            let recovery_start_req = state
+                .opaque_node
+                .local_login_start(password.clone(), username.clone())?;
+
             let login_start_req =
                 RequestMessage::OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage {
                     recovery_start_req: recovery_start_req.clone(),
@@ -906,7 +914,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut s = state.recovery_received.take().unwrap();
         s.insert(message.node_username.clone(), message.recovery_start_resp);
 
-        if s.len() < state.threshold {
+        if s.len() < state.recovery_expecting.unwrap() {
             state.recovery_received = Some(s);
             return Ok(());
         }

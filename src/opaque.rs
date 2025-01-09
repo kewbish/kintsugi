@@ -36,7 +36,7 @@ pub struct P2POpaqueNode {
     pub(crate) peer_opaque_keys: HashMap<String, Keypair>,
     pub(crate) peer_attempted_public_keys: HashMap<String, PublicKey>,
     pub(crate) envelopes: HashMap<String, EncryptedEnvelope>,
-    pub(crate) oprf_client: Option<OPRFClient>,
+    pub(crate) peer_oprf_clients: HashMap<String, OPRFClient>,
 }
 
 impl P2POpaqueNode {
@@ -46,8 +46,8 @@ impl P2POpaqueNode {
             keypair: Keypair::new(),
             peer_opaque_keys: HashMap::new(),
             peer_attempted_public_keys: HashMap::new(),
+            peer_oprf_clients: HashMap::new(),
             envelopes: HashMap::new(),
-            oprf_client: None,
         }
     }
 }
@@ -63,10 +63,11 @@ impl P2POpaqueNode {
     pub fn local_registration_start(
         &mut self,
         password: String,
+        node_username: String,
     ) -> Result<RegStartRequest, P2POpaqueError> {
         let password_point = RistrettoPoint::hash_from_bytes::<Sha3_512>(password.as_bytes());
         let (password_blind_result, state) = OPRFClient::blind(password_point);
-        self.oprf_client = Some(state);
+        self.peer_oprf_clients.insert(node_username, state);
         Ok(RegStartRequest {
             blinded_pwd: password_blind_result,
             peer_public_key: self.keypair.public_key,
@@ -147,21 +148,27 @@ impl P2POpaqueNode {
         &mut self,
         peer_resps: Vec<RegStartResponse>,
     ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
-        if let None = self.oprf_client {
-            return Err(P2POpaqueError::CryptoError(
-                "OPRF client not initialized".to_string(),
-            ));
+        let mut combined_rwds = Vec::new();
+        for peer_resp in peer_resps.iter() {
+            let oprf_client = self.peer_oprf_clients.get(&peer_resp.node_username);
+            if let None = oprf_client {
+                return Err(P2POpaqueError::CryptoError(
+                    "OPRF client not initialized".to_string(),
+                ));
+            }
+            let oprf_client = oprf_client.unwrap();
+            let unblinded_rwd = oprf_client.unblind(peer_resp.rwd);
+            if let Err(e) = unblinded_rwd {
+                return Err(P2POpaqueError::CryptoError(
+                    "Unblinding failed: ".to_string() + &e.to_string(),
+                ));
+            }
+            combined_rwds.push(unblinded_rwd.unwrap());
         }
-        let combined_rwd = peer_resps.iter().map(|resp| resp.rwd.clone()).sum();
-        let oprf_client = self.oprf_client.as_ref().unwrap();
-        let unblinded_rwd = oprf_client.unblind(combined_rwd);
-        if let Err(e) = unblinded_rwd {
-            return Err(P2POpaqueError::CryptoError(
-                "Unblinding failed: ".to_string() + &e.to_string(),
-            ));
-        }
+        let combined_rwd: RistrettoPoint = combined_rwds.iter().sum();
+
         let mut hasher = Sha3_256::new();
-        hasher.update(unblinded_rwd.unwrap().compress().to_bytes());
+        hasher.update(combined_rwd.compress().to_bytes());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let mut nonce_bytes = [0u8; 12];
@@ -197,6 +204,8 @@ impl P2POpaqueNode {
                 signature: signature.clone(),
             })
         }
+
+        self.peer_oprf_clients = HashMap::new(); // clear OPRF clients
 
         Ok(result)
     }
@@ -242,10 +251,11 @@ impl P2POpaqueNode {
     pub fn local_login_start(
         &mut self,
         password: String,
+        node_username: String,
     ) -> Result<LoginStartRequest, P2POpaqueError> {
         let password_point = RistrettoPoint::hash_from_bytes::<Sha3_512>(password.as_bytes());
         let (password_blind_result, state) = OPRFClient::blind(password_point);
-        self.oprf_client = Some(state);
+        self.peer_oprf_clients.insert(node_username, state);
         Ok(LoginStartRequest {
             blinded_pwd: password_blind_result,
             user_username: self.id.clone(),
@@ -299,25 +309,30 @@ impl P2POpaqueNode {
 
 impl P2POpaqueNode {
     pub fn local_login_finish(
-        &self,
+        &mut self,
         peer_resps: Vec<LoginStartResponse>,
     ) -> Result<Keypair, P2POpaqueError> {
-        if let None = self.oprf_client {
-            return Err(P2POpaqueError::CryptoError(
-                "OPRF client not initialized".to_string(),
-            ));
+        let mut combined_rwds = Vec::new();
+        for peer_resp in peer_resps.iter() {
+            let oprf_client = self.peer_oprf_clients.get(&peer_resp.node_username);
+            if let None = oprf_client {
+                return Err(P2POpaqueError::CryptoError(
+                    "OPRF client not initialized".to_string(),
+                ));
+            }
+            let oprf_client = oprf_client.unwrap();
+            let unblinded_rwd = oprf_client.unblind(peer_resp.rwd);
+            if let Err(e) = unblinded_rwd {
+                return Err(P2POpaqueError::CryptoError(
+                    "Unblinding failed: ".to_string() + &e.to_string(),
+                ));
+            }
+            combined_rwds.push(unblinded_rwd.unwrap());
         }
-        let combined_rwd = peer_resps.iter().map(|resp| resp.rwd.clone()).sum();
-        let oprf_client = self.oprf_client.as_ref().unwrap();
-        let unblinded_rwd = oprf_client.unblind(combined_rwd);
-        if let Err(e) = unblinded_rwd {
-            return Err(P2POpaqueError::CryptoError(
-                "Unblinding failed: ".to_string() + &e.to_string(),
-            ));
-        }
-        let unblinded_rwd = unblinded_rwd.unwrap();
+        let combined_rwd: RistrettoPoint = combined_rwds.iter().sum();
+
         let mut hasher = Sha3_256::new();
-        hasher.update(unblinded_rwd.compress().to_bytes());
+        hasher.update(combined_rwd.compress().to_bytes());
         let key = hasher.finalize();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let nonce_bytes = peer_resps[0].envelope.nonce;
@@ -337,6 +352,9 @@ impl P2POpaqueNode {
                 "Deserialization failed: ".to_string() + &e.to_string(),
             ));
         }
+
+        self.peer_oprf_clients = HashMap::new(); // clear OPRF clients
+
         let plaintext = plaintext.unwrap();
         Ok(plaintext.keypair)
     }

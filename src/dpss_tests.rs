@@ -214,6 +214,16 @@ mod dpss_test {
             (scalar_two, poly_hat_2.at(2)),
             (scalar_three, poly_hat_3.at(2)),
         ]);
+        let polynomials_evals_3 = HashMap::from([
+            (Scalar::ONE, poly_1.at(3)),
+            (scalar_two, poly_2.at(3)),
+            (scalar_three, poly_3.at(3)),
+        ]);
+        let polynomials_hats_3 = HashMap::from([
+            (Scalar::ONE, poly_hat_1.at(3)),
+            (scalar_two, poly_hat_2.at(3)),
+            (scalar_three, poly_hat_3.at(3)),
+        ]);
         let commitments =
             HashMap::from([(Scalar::ONE, c_1), (scalar_two, c_2), (scalar_three, c_3)]);
 
@@ -225,10 +235,14 @@ mod dpss_test {
         .unwrap();
 
         let (new_share_2, _, _) =
-            DPSS::reshare_w_evals(polynomials_evals_2, polynomials_hats_2, commitments).unwrap();
+            DPSS::reshare_w_evals(polynomials_evals_2, polynomials_hats_2, commitments.clone())
+                .unwrap();
+        let (new_share_3, _, _) =
+            DPSS::reshare_w_evals(polynomials_evals_3, polynomials_hats_3, commitments).unwrap();
 
         let new_rwd_share_1 = new_share_1 * password_point;
         let new_rwd_share_2 = new_share_2 * password_point;
+        let new_rwd_share_3 = new_share_3 * password_point;
 
         let mut all_indices = HashSet::from([i32_to_scalar(1), i32_to_scalar(2), i32_to_scalar(3)]);
         let combined_rwd = get_lagrange_coefficient(i32_to_scalar(1), all_indices.clone())
@@ -240,12 +254,17 @@ mod dpss_test {
             + get_lagrange_coefficient(i32_to_scalar(3), all_indices.clone())
                 * share_3
                 * password_point;
+        let all_combined_rwd = get_lagrange_coefficient(i32_to_scalar(1), all_indices.clone())
+            * new_rwd_share_1
+            + get_lagrange_coefficient(i32_to_scalar(2), all_indices.clone()) * new_rwd_share_2
+            + get_lagrange_coefficient(i32_to_scalar(3), all_indices.clone()) * new_rwd_share_3;
         all_indices.remove(&i32_to_scalar(3));
         let new_combined_rwd = get_lagrange_coefficient(i32_to_scalar(1), all_indices.clone())
             * new_rwd_share_1
             + get_lagrange_coefficient(i32_to_scalar(2), all_indices) * new_rwd_share_2;
 
         assert_eq!(combined_rwd, rwd);
+        assert_eq!(all_combined_rwd, rwd);
         assert_eq!(new_combined_rwd, rwd);
     }
 }
