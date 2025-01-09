@@ -43,7 +43,6 @@ use opaque::{
     EncryptedEnvelope, LoginStartRequest, LoginStartResponse, P2POpaqueNode, RegFinishRequest,
     RegStartRequest, RegStartResponse,
 };
-use polynomial::Polynomial;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -80,7 +79,6 @@ struct NodeState {
     opaque_node: P2POpaqueNode,
     // the indices for nodes for which this node is a recovery node
     peer_recoveries: HashMap<String, (ACSSNodeShare, i32)>,
-    phi_polynomials: Option<(Polynomial, Polynomial)>,
     registration_received: Option<HashMap<String, RegStartResponse>>,
     recovery_received: Option<HashMap<String, LoginStartResponse>>,
     reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare, i32, RistrettoPoint)>>,
@@ -366,7 +364,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
         opaque_node: P2POpaqueNode::new("".to_string()),
         peer_recoveries: HashMap::new(),
-        phi_polynomials: None,
         registration_received: None,
         recovery_received: None,
         reshare_received: None,
@@ -651,7 +648,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect();
 
         let s = Scalar::random(&mut OsRng);
-        let (acss_dealer_shares, phi, phi_hat) = ACSS::share_dealer(
+        let (acss_dealer_shares, _, _) = ACSS::share_dealer(
             state.h_point,
             s,
             threshold - 1,
@@ -659,7 +656,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer_public_keys,
             recovery_addresses.clone(),
         )?;
-        state.phi_polynomials = Some((phi, phi_hat));
         state.registration_received = Some(HashMap::new());
 
         let reg_start_req = state.opaque_node.local_registration_start(password)?;
@@ -989,6 +985,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
         }
 
+        state.reshare_complete_received = None;
+
         Ok(())
     }
 
@@ -1157,6 +1155,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node_username: state.username.clone(),
         });
         send_request_msg(swarm, state, message.user_username, complete_msg);
+
+        state.reshare_received = None;
 
         println!("[DPSS RESH] Successfully refreshed secret shares");
 
