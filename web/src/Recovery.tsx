@@ -64,13 +64,13 @@ const Recovery = () => {
   const { setIsLoggedIn } = useContext(AuthContext);
 
   const startRecovery = async () => {
-    let recoveryNodes = new Map();
+    let recoveryAddresses = new Map();
     for (const i in peers) {
       if (selectedPeers[i]) {
-        recoveryNodes.set(peers[i][0], peers[i][1]);
+        recoveryAddresses.set(peers[i][0], peers[i][1]);
       }
     }
-    invoke("local_recovery", { username, password, recoveryNodes })
+    invoke("local_recovery", { username, password, recoveryAddresses })
       .then(() => {
         setRecoveryLoading(true);
       })

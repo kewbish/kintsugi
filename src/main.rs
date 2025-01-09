@@ -402,9 +402,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .unwrap();
             state.opaque_keypair = bootstrap_node_state.opaque_keypair.clone();
             state.opaque_node.keypair = bootstrap_node_state.opaque_keypair.clone();
-            state
-                .username_to_peer_id
-                .insert(state.username.clone(), bootstrap_node_state.peer_id.clone());
             state.username_to_opaque_pkey.insert(
                 state.username.clone(),
                 bootstrap_node_state.opaque_keypair.clone().public_key,
@@ -433,9 +430,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     bootstrap_keypair = libp2p_keypair;
                     state.opaque_keypair = opaque_keypair.clone();
                     state.opaque_node.keypair = opaque_keypair.clone();
-                    state
-                        .username_to_peer_id
-                        .insert(state.username.clone(), new_peer_id);
                     state
                         .username_to_opaque_pkey
                         .insert(state.username.clone(), opaque_keypair.public_key);
@@ -524,6 +518,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             state.opaque_node.id = username.clone();
             let pkey = state.opaque_keypair.public_key.clone();
             state.username_to_opaque_pkey.insert(username.clone(), pkey);
+            let peer_id = state.peer_id.clone();
+            state.username_to_peer_id.insert(username.clone(), peer_id);
 
             let (_peer_id_kad_record, peer_id_record) = KadRecord::new(
                 RecordKey::new(&format!("/peer_id/{}", state.username)),
@@ -1391,6 +1387,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         threshold: usize,
     ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
+
+        if node_state.username_to_peer_id.contains_key(&username) {
+            return Err("Username is already taken.".to_string());
+        }
+
+        for address in recovery_addresses.keys() {
+            if !node_state.username_to_peer_id.contains_key(address) {
+                return Err(format!("Recovery node {address} could not be found"));
+            }
+        }
+
         node_state.username = username.clone();
         save_local_envelope(
             username.clone(),
@@ -1534,9 +1541,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state: State<TauriState>,
         username: String,
         password: String,
-        recovery_nodes: HashMap<String, i32>,
+        recovery_addresses: HashMap<String, i32>,
     ) -> Result<(), String> {
         let mut node_state = state.0.lock().unwrap();
+
+        if !node_state.username_to_peer_id.contains_key(&username) {
+            return Err(format!("User {username} could not be found"));
+        }
+
+        for address in recovery_addresses.keys() {
+            if !node_state.username_to_peer_id.contains_key(address) {
+                return Err(format!("Recovery node {address} could not be found"));
+            }
+        }
+
         node_state.username = username.clone();
         node_state.opaque_node.id = username.clone();
         let tx_clone = state.1.clone();
@@ -1545,7 +1563,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .send(TauriToRustCommand::RecoveryStart(
                     username,
                     password,
-                    recovery_nodes,
+                    recovery_addresses,
                 ))
                 .await
                 .unwrap();
@@ -1560,6 +1578,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         new_threshold: i32,
     ) -> Result<(), String> {
         let tx_clone = state.1.clone();
+
+        let node_state = state.0.lock().unwrap();
+        for address in new_recovery_addresses.keys() {
+            if !node_state.username_to_peer_id.contains_key(address) {
+                return Err(format!("Recovery node {address} could not be found"));
+            }
+        }
+
         tauri::async_runtime::spawn(async move {
             tx_clone
                 .send(TauriToRustCommand::RefreshStart(
