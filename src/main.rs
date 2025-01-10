@@ -443,6 +443,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ));
     }
 
+    read_recovery_shares_local(&mut state)?;
+    read_envelopes_local(&mut state)?;
+
     let state_arc = Arc::new(Mutex::new(state));
 
     let mut swarm = new_swarm(bootstrap_keypair)?;
@@ -462,7 +465,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             RequestMessage::OPRFRegFinishReqMessage(msg) => {
                 handle_message_reg_finish_req(&mut state, swarm, peer_id, msg)?;
-                update_recovery_addrs_local(&mut state)
+                update_recovery_shares_local(&mut state)
             }
             RequestMessage::OPRFRecoveryStartReqMessage(msg) => {
                 handle_message_rec_start_req(&mut state, swarm, peer_id, msg, channel)
@@ -471,7 +474,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_message_dpss_init(&mut state, swarm, peer_id, msg)
             }
             RequestMessage::DPSSRefreshReshareMessage(msg) => {
-                handle_message_dpss_reshare(&mut state, swarm, peer_id, msg)
+                handle_message_dpss_reshare(&mut state, swarm, peer_id, msg)?;
+                update_recovery_shares_local(&mut state)
             }
             RequestMessage::DPSSRefreshCompleteMessage(msg) => {
                 let res = handle_message_dpss_complete(&mut state, swarm, peer_id, msg)?;
@@ -546,47 +550,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ) {
                 println!("[KAD] Error {:?}", e.to_string());
                 return Err(e.to_string());
-            }
-
-            if state.username_to_index.len() == 0 {
-                let file_path = format!("tmp/{}_peers.list", state.username);
-                if Path::new(&file_path).exists() {
-                    let contents = std::fs::read_to_string(file_path);
-                    if let Err(e) = contents {
-                        return Err(e.to_string());
-                    }
-                    let peers_list: Result<
-                        (
-                            usize,
-                            HashMap<String, i32>,
-                            HashMap<String, (ACSSNodeShare, i32)>,
-                        ),
-                        _,
-                    > = serde_json::from_str(&contents.unwrap());
-                    if let Err(e) = peers_list {
-                        return Err(e.to_string());
-                    }
-                    let peers_list = peers_list.unwrap();
-                    state.threshold = peers_list.0;
-                    state.username_to_index = peers_list.1;
-                    state.peer_recoveries = peers_list.2;
-                }
-            }
-
-            if state.opaque_node.envelopes.len() == 0 {
-                let file_path = format!("tmp/{}_envelopes.list", state.username);
-                if Path::new(&file_path).exists() {
-                    let contents = std::fs::read_to_string(file_path);
-                    if let Err(e) = contents {
-                        return Err(e.to_string());
-                    }
-                    let envelopes_list: Result<HashMap<String, EncryptedEnvelope>, _> =
-                        serde_json::from_str(&contents.unwrap());
-                    if let Err(e) = envelopes_list {
-                        return Err(e.to_string());
-                    }
-                    state.opaque_node.envelopes = envelopes_list.unwrap();
-                }
             }
         }
 
@@ -1206,12 +1169,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(true)
     }
 
-    fn update_recovery_addrs_local(state: &mut NodeState) -> Result<(), Box<dyn Error>> {
-        let serialized_peers = serde_json::to_string(&(
-            state.threshold.clone(),
-            state.username_to_index.clone(),
-            state.peer_recoveries.clone(),
-        ))?;
+    fn read_envelopes_local(state: &mut NodeState) -> Result<(), String> {
+        let file_path = format!("tmp/{}_envelopes.list", state.username);
+        if Path::new(&file_path).exists() {
+            let contents = std::fs::read_to_string(file_path);
+            if let Err(e) = contents {
+                return Err(e.to_string());
+            }
+            let envelopes_list: Result<HashMap<String, EncryptedEnvelope>, _> =
+                serde_json::from_str(&contents.unwrap());
+            if let Err(e) = envelopes_list {
+                return Err(e.to_string());
+            }
+            state.opaque_node.envelopes = envelopes_list.unwrap();
+        }
+        Ok(())
+    }
+
+    fn read_recovery_shares_local(state: &mut NodeState) -> Result<(), String> {
+        let file_path = format!("tmp/{}_peers.list", state.username);
+        if Path::new(&file_path).exists() {
+            let contents = std::fs::read_to_string(file_path);
+            if let Err(e) = contents {
+                return Err(e.to_string());
+            }
+            let peers_list: Result<HashMap<String, (ACSSNodeShare, i32)>, _> =
+                serde_json::from_str(&contents.unwrap());
+            if let Err(e) = peers_list {
+                return Err(e.to_string());
+            }
+            state.peer_recoveries = peers_list.unwrap();
+        }
+        Ok(())
+    }
+
+    fn update_recovery_shares_local(state: &mut NodeState) -> Result<(), Box<dyn Error>> {
+        let serialized_peers = serde_json::to_string(&state.peer_recoveries.clone())?;
         let file_path = format!("tmp/{}_peers.list", state.username);
         let mut file = fs::File::create(file_path)?;
         file.write_all(serialized_peers.as_bytes())?;
@@ -1223,9 +1216,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state_arc: Arc<Mutex<NodeState>>,
         swarm: &mut Swarm<P2PBehaviour>,
     ) -> Result<(), Box<dyn Error>> {
-        let mut state = state_arc.lock().unwrap();
-
-        update_recovery_addrs_local(&mut state)?;
+        let state = state_arc.lock().unwrap();
 
         let (_recv_addr_kad_record, recv_addr_record) = KadRecord::new(
             RecordKey::new(&format!("/recv_addr/{}", state.username)),
@@ -1410,6 +1401,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         node_state.username = username.clone();
+        node_state.username_to_index = recovery_addresses.clone();
         save_local_envelope(
             username.clone(),
             password.clone(),
