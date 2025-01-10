@@ -18,7 +18,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, ristretto::CompressedRistretto};
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use dpss::DPSS;
 use futures::prelude::*;
@@ -76,11 +76,14 @@ struct NodeState {
     username_to_index: HashMap<String, i32>, // this node's recovery nodes' indices
     username_to_opaque_pkey: HashMap<String, PublicKey>,
     h_point: RistrettoPoint,
+    // volatile, temporary map populated by Kademlia queries
+    username_to_h_point_queries: HashMap<String, RistrettoPoint>,
     opaque_node: P2POpaqueNode,
     // the indices for nodes for which this node is a recovery node
     peer_recoveries: HashMap<String, (ACSSNodeShare, i32)>,
     registration_received: Option<HashMap<String, RegStartResponse>>,
     recovery_expecting: Option<usize>,
+    recovery_h_point: Option<RistrettoPoint>,
     recovery_received: Option<HashMap<String, LoginStartResponse>>,
     reshare_received: Option<HashMap<String, (ACSSNodeShare, ACSSNodeShare, i32, RistrettoPoint)>>,
     reshare_complete_received: Option<HashSet<String>>,
@@ -131,6 +134,7 @@ struct OPRFRegFinishReqMessage {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRecoveryStartReqMessage {
     recovery_start_req: LoginStartRequest,
+    h_point: RistrettoPoint,
     other_indices: HashSet<i32>,
     user_username: String,
     node_index: i32,
@@ -140,6 +144,7 @@ struct OPRFRecoveryStartReqMessage {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct OPRFRecoveryStartRespMessage {
     recovery_start_resp: LoginStartResponse,
+    h_point: RistrettoPoint,
     user_username: String,
     node_index: i32,
     node_username: String,
@@ -205,7 +210,7 @@ struct P2PBehaviour {
 
 enum TauriToRustCommand {
     RegStart(String, String, HashMap<String, i32>, usize),
-    RecoveryStart(String, String, HashMap<String, i32>),
+    RecoveryStart(String, String, HashMap<String, i32>, RistrettoPoint),
     RefreshStart(HashMap<String, i32>, i32),
     GetRecvAddrs(String),
 }
@@ -226,18 +231,6 @@ struct TauriRecFinished {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct TauriRefrFinished {}
-
-/*#[derive(Clone, Debug, Eq, PartialEq)]
-struct HashedKadRecord(Record);
-
-impl std::hash::Hash for HashedKadRecord {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.key.hash(state);
-        self.0.value.hash(state);
-        self.0.publisher.hash(state);
-        self.0.expires.hash(state);
-    }
-}*/
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct KadRecord {
@@ -282,7 +275,7 @@ impl KadRecord {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 enum KadRecordType {
     Pk(PublicKey),
-    RecvAddr(BTreeMap<String, i32>, usize),
+    RecvAddr(BTreeMap<String, i32>, usize, [u8; 32]),
     PeerId(PeerId),
 }
 
@@ -363,10 +356,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         username_to_index: HashMap::new(), // temp
         username_to_opaque_pkey: HashMap::new(),
         h_point: Scalar::random(&mut OsRng) * RISTRETTO_BASEPOINT_POINT,
+        username_to_h_point_queries: HashMap::new(),
         opaque_node: P2POpaqueNode::new("".to_string()),
         peer_recoveries: HashMap::new(),
         registration_received: None,
         recovery_expecting: None,
+        recovery_h_point: None,
         recovery_received: None,
         reshare_received: None,
         reshare_complete_received: None,
@@ -827,6 +822,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _username: String,
         password: String,
         recovery_addresses: HashMap<String, i32>,
+        h_point: RistrettoPoint,
     ) -> Result<(), Box<dyn Error>> {
         let mut state = state_arc.lock().unwrap();
 
@@ -847,6 +843,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let login_start_req =
                 RequestMessage::OPRFRecoveryStartReqMessage(OPRFRecoveryStartReqMessage {
                     recovery_start_req: recovery_start_req.clone(),
+                    h_point,
                     other_indices: other_indices.clone(),
                     user_username: state.username.clone(),
                     node_index: index.clone(),
@@ -880,6 +877,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let rec_start_resp_message =
             ResponseMessage::OPRFRecoveryStartRespMessage(OPRFRecoveryStartRespMessage {
                 recovery_start_resp: rec_start_resp,
+                h_point: message.h_point,
                 user_username: message.user_username.clone(),
                 node_index: message.node_index,
                 node_username: state.username.clone(),
@@ -913,6 +911,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let mut s = state.recovery_received.take().unwrap();
         s.insert(message.node_username.clone(), message.recovery_start_resp);
+        state.recovery_h_point = Some(message.h_point);
 
         if s.len() < state.recovery_expecting.unwrap() {
             state.recovery_received = Some(s);
@@ -954,6 +953,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+
+        state.h_point = state.recovery_h_point.unwrap();
+        state.recovery_h_point = None;
 
         Ok(())
     }
@@ -1235,6 +1237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .map(|(k, v)| (k.clone(), v.clone())),
                 ),
                 state.threshold,
+                state.h_point.compress().to_bytes(),
             ),
             state.username.clone(),
             state.peer_id,
@@ -1565,6 +1568,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         node_state.username = username.clone();
         node_state.opaque_node.id = username.clone();
+        let h_point = node_state.username_to_h_point_queries.get(&username);
+        if let None = h_point {
+            return Err(format!("User recovery config was incomplete"));
+        }
+        let h_point = h_point.unwrap().clone();
+
         let tx_clone = state.1.clone();
         tauri::async_runtime::spawn(async move {
             tx_clone
@@ -1572,6 +1581,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     username,
                     password,
                     recovery_addresses,
+                    h_point,
                 ))
                 .await
                 .unwrap();
@@ -1645,7 +1655,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .username_to_opaque_pkey
                     .insert(deserialized_record.username.clone(), public_key);
             }
-            KadRecordType::RecvAddr(recovery_addresses, threshold) => {
+            KadRecordType::RecvAddr(recovery_addresses, threshold, h_point) => {
                 let recovery_addresses_hashmap = HashMap::from_iter(
                     recovery_addresses
                         .iter()
@@ -1664,6 +1674,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 } else {
                     println!("[KAD] Emitted Tauri update")
                 }
+                state.username_to_h_point_queries.insert(
+                    deserialized_record.username,
+                    CompressedRistretto::from_slice(&h_point)
+                        .unwrap()
+                        .decompress()
+                        .unwrap(),
+                );
             }
             KadRecordType::PeerId(peer_id) => {
                 let username_peer_id_map = state.username_to_peer_id.clone();
@@ -1725,7 +1742,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 );
                 state.kad_done.insert(query_id);
                 // the only get without filtering should be for the recv addrs
-                if let KadRecordType::RecvAddr(_, _) = deserialized_actual_record.data {
+                if let KadRecordType::RecvAddr(_, _, _) = deserialized_actual_record.data {
                     std::mem::drop(state);
                     handle_kad_data_store_emit(
                         state_arc.clone(),
@@ -1901,8 +1918,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     handle_username_update(state_arc.clone(), &mut swarm, username).unwrap();
                                     handle_reg_init(state_arc.clone(), &mut swarm, password, recovery_nodes, threshold).unwrap();
                                 }
-                                TauriToRustCommand::RecoveryStart(username, password, recovery_nodes) => {
-                                    handle_recovery_init(state_arc.clone(), &mut swarm, username, password, recovery_nodes).unwrap();
+                                TauriToRustCommand::RecoveryStart(username, password, recovery_nodes, h_point) => {
+                                    handle_recovery_init(state_arc.clone(), &mut swarm, username, password, recovery_nodes, h_point).unwrap();
                                 }
                                 TauriToRustCommand::RefreshStart(recovery_nodes, new_threshold) => {
                                     handle_refresh_init(state_arc.clone(), &mut swarm, recovery_nodes, new_threshold as usize).unwrap();
