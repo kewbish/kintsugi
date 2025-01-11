@@ -65,34 +65,35 @@ impl DPSS {
     pub fn reshare_w_evals(
         evaluations: HashMap<Scalar, Scalar>,
         evaluations_hats: HashMap<Scalar, Scalar>,
-        commitments: HashMap<Scalar, RistrettoPoint>,
-    ) -> Result<(Scalar, Scalar, HashMap<Scalar, RistrettoPoint>), P2POpaqueError> {
+    ) -> Result<(Scalar, Scalar), P2POpaqueError> {
         let evals_keys: HashSet<Scalar> = evaluations.keys().copied().collect();
         let evals_hats_keys: HashSet<Scalar> = evaluations_hats.keys().copied().collect();
-        let commitments_keys: HashSet<Scalar> = commitments.keys().copied().collect();
-        if !(evals_keys == evals_hats_keys && evals_hats_keys == commitments_keys) {
+        if !(evals_keys == evals_hats_keys) {
             return Err(P2POpaqueError::CryptoError(
-                "Missing shares, blinding factors, or commitments for some nodes".to_string(),
+                "Missing shares or blinding factors for some nodes".to_string(),
             ));
         }
 
         let s_i_d_prime = BivariatePolynomial::interpolate_0(evaluations);
         let s_hat_i_d_prime = BivariatePolynomial::interpolate_0(evaluations_hats);
 
-        let mut new_commitments = HashMap::new();
-        for (i, _) in commitments.iter() {
-            let mut new_commitment = Scalar::ZERO * RISTRETTO_BASEPOINT_POINT;
-            for (other_index, other_old_commitment) in commitments.iter() {
-                new_commitment += get_lagrange_coefficient_w_target(
-                    i.clone(),
-                    other_index.clone(),
-                    commitments_keys.clone(),
-                ) * other_old_commitment;
-            }
-            new_commitments.insert(i.clone(), new_commitment);
-        }
+        Ok((s_i_d_prime, s_hat_i_d_prime))
+    }
 
-        Ok((s_i_d_prime, s_hat_i_d_prime, new_commitments))
+    pub fn get_commitment_at_index(
+        index: Scalar,
+        commitments: HashMap<Scalar, RistrettoPoint>,
+    ) -> RistrettoPoint {
+        let commitments_keys: HashSet<Scalar> = commitments.keys().copied().collect();
+        let mut new_commitment = Scalar::ZERO * RISTRETTO_BASEPOINT_POINT;
+        for (other_index, other_old_commitment) in commitments.iter() {
+            new_commitment += get_lagrange_coefficient_w_target(
+                index.clone(),
+                other_index.clone(),
+                commitments_keys.clone(),
+            ) * other_old_commitment;
+        }
+        new_commitment
     }
 }
 

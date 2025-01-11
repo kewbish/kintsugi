@@ -1,10 +1,8 @@
-use std::collections::HashSet;
-
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-use crate::{opaque::P2POpaqueError, polynomial};
+use crate::opaque::P2POpaqueError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OPRFClient {
@@ -35,15 +33,8 @@ impl OPRFClient {
 pub struct OPRFServer {}
 
 impl OPRFServer {
-    pub fn blind_evaluate(
-        point: RistrettoPoint,
-        eval_secret_share: Scalar,
-        eval_secret_share_index: Scalar,
-        other_indices: HashSet<Scalar>,
-    ) -> RistrettoPoint {
-        let lagrange_coeff =
-            polynomial::get_lagrange_coefficient(eval_secret_share_index, other_indices);
-        return lagrange_coeff * eval_secret_share * point;
+    pub fn blind_evaluate(point: RistrettoPoint, eval_secret_share: Scalar) -> RistrettoPoint {
+        return eval_secret_share * point;
     }
 }
 

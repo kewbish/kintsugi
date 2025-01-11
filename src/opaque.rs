@@ -1,5 +1,6 @@
 use crate::keypair::{Keypair, PublicKey};
 use crate::oprf::{OPRFClient, OPRFServer};
+use crate::polynomial;
 use crate::signature::Signature;
 use crate::util::i32_to_scalar;
 #[allow(unused_imports)]
@@ -90,7 +91,6 @@ impl P2POpaqueNode {
         peer_req: RegStartRequest,
         s_i_d: Scalar,
         index: i32,
-        other_indices: HashSet<i32>,
     ) -> Result<RegStartResponse, P2POpaqueError> {
         let opaque_keypair = Keypair::new();
         self.peer_opaque_keys
@@ -103,15 +103,7 @@ impl P2POpaqueNode {
         }
         self.peer_attempted_public_keys
             .insert(peer_req.user_username, peer_req.peer_public_key);
-        let password_blind_eval = OPRFServer::blind_evaluate(
-            peer_req.blinded_pwd,
-            s_i_d,
-            i32_to_scalar(index),
-            other_indices
-                .iter()
-                .map(|i| i32_to_scalar(i.clone()))
-                .collect(),
-        );
+        let password_blind_eval = OPRFServer::blind_evaluate(peer_req.blinded_pwd, s_i_d);
         Ok(RegStartResponse {
             rwd: password_blind_eval,
             index,
@@ -149,6 +141,8 @@ impl P2POpaqueNode {
         peer_resps: Vec<RegStartResponse>,
     ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
         let mut combined_rwds = Vec::new();
+        let other_indices: HashSet<Scalar> =
+            peer_resps.iter().map(|v| i32_to_scalar(v.index)).collect();
         for peer_resp in peer_resps.iter() {
             let oprf_client = self.peer_oprf_clients.get(&peer_resp.node_username);
             if let None = oprf_client {
@@ -163,7 +157,11 @@ impl P2POpaqueNode {
                     "Unblinding failed: ".to_string() + &e.to_string(),
                 ));
             }
-            combined_rwds.push(unblinded_rwd.unwrap());
+            let lagrange_coeff = polynomial::get_lagrange_coefficient(
+                i32_to_scalar(peer_resp.index),
+                other_indices.clone(),
+            );
+            combined_rwds.push(lagrange_coeff * unblinded_rwd.unwrap());
         }
         let combined_rwd: RistrettoPoint = combined_rwds.iter().sum();
 
@@ -278,7 +276,6 @@ impl P2POpaqueNode {
         peer_req: LoginStartRequest,
         s_i_d: Scalar,
         index: i32,
-        other_indices: HashSet<i32>,
     ) -> Result<LoginStartResponse, P2POpaqueError> {
         let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.user_username);
         if let None = local_opaque_keypair {
@@ -288,15 +285,7 @@ impl P2POpaqueNode {
         if let None = envelope {
             return Err(P2POpaqueError::RegistrationError);
         }
-        let password_blind_eval = OPRFServer::blind_evaluate(
-            peer_req.blinded_pwd,
-            s_i_d,
-            i32_to_scalar(index),
-            other_indices
-                .iter()
-                .map(|i| i32_to_scalar(i.clone()))
-                .collect(),
-        );
+        let password_blind_eval = OPRFServer::blind_evaluate(peer_req.blinded_pwd, s_i_d);
         Ok(LoginStartResponse {
             rwd: password_blind_eval,
             index,
@@ -313,6 +302,8 @@ impl P2POpaqueNode {
         peer_resps: Vec<LoginStartResponse>,
     ) -> Result<Keypair, P2POpaqueError> {
         let mut combined_rwds = Vec::new();
+        let other_indices: HashSet<Scalar> =
+            peer_resps.iter().map(|v| i32_to_scalar(v.index)).collect();
         for peer_resp in peer_resps.iter() {
             let oprf_client = self.peer_oprf_clients.get(&peer_resp.node_username);
             if let None = oprf_client {
@@ -327,7 +318,11 @@ impl P2POpaqueNode {
                     "Unblinding failed: ".to_string() + &e.to_string(),
                 ));
             }
-            combined_rwds.push(unblinded_rwd.unwrap());
+            let lagrange_coeff = polynomial::get_lagrange_coefficient(
+                i32_to_scalar(peer_resp.index),
+                other_indices.clone(),
+            );
+            combined_rwds.push(lagrange_coeff * unblinded_rwd.unwrap());
         }
         let combined_rwd: RistrettoPoint = combined_rwds.iter().sum();
 

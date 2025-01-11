@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod opaque_test {
-    use std::collections::HashSet;
-
     use curve25519_dalek::Scalar;
 
     use crate::{
@@ -20,12 +18,8 @@ mod opaque_test {
         assert_eq!(reg_start_req_1.user_username, "Alice".to_string());
         assert_eq!(reg_start_req_1.peer_public_key, node_1.keypair.public_key);
 
-        let reg_start_resp_node_2 = node_2.peer_registration_start(
-            reg_start_req_1,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2, 3]),
-        )?;
+        let reg_start_resp_node_2 =
+            node_2.peer_registration_start(reg_start_req_1, i32_to_scalar(1), 2)?;
         assert_eq!(
             reg_start_resp_node_2.peer_public_key,
             node_2.keypair.public_key
@@ -33,12 +27,8 @@ mod opaque_test {
 
         let reg_start_req_2 =
             node_1.local_registration_start("password".to_string(), "Charlie".to_string())?;
-        let reg_start_resp_node_3 = node_3.peer_registration_start(
-            reg_start_req_2,
-            i32_to_scalar(1),
-            3,
-            HashSet::from([1, 2, 3]),
-        )?;
+        let reg_start_resp_node_3 =
+            node_3.peer_registration_start(reg_start_req_2, i32_to_scalar(1), 3)?;
         assert_eq!(
             reg_start_resp_node_3.peer_public_key,
             node_3.keypair.public_key
@@ -60,12 +50,8 @@ mod opaque_test {
             node_1.local_login_start("password".to_string(), "Bob".to_string())?;
         assert_eq!(login_start_req_1.user_username, "Alice".to_string());
 
-        let login_start_resp_node_2 = node_2.peer_login_start(
-            login_start_req_1,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2, 3]),
-        )?;
+        let login_start_resp_node_2 =
+            node_2.peer_login_start(login_start_req_1, i32_to_scalar(1), 2)?;
         assert_eq!(
             login_start_resp_node_2.peer_public_key,
             node_2.keypair.public_key
@@ -73,12 +59,8 @@ mod opaque_test {
 
         let login_start_req_2 =
             node_1.local_login_start("password".to_string(), "Charlie".to_string())?;
-        let login_start_resp_node_3 = node_3.peer_login_start(
-            login_start_req_2,
-            i32_to_scalar(1),
-            3,
-            HashSet::from([1, 2, 3]),
-        )?;
+        let login_start_resp_node_3 =
+            node_3.peer_login_start(login_start_req_2, i32_to_scalar(1), 3)?;
         assert_eq!(
             login_start_resp_node_3.peer_public_key,
             node_3.keypair.public_key
@@ -103,12 +85,7 @@ mod opaque_test {
             node_1.local_registration_start("password".to_string(), "Bob".to_string())?;
         assert_eq!(reg_start_req.user_username, "Alice".to_string());
 
-        let reg_start_resp = node_2.peer_registration_start(
-            reg_start_req,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2, 3]),
-        )?;
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req, i32_to_scalar(1), 2)?;
         assert_eq!(reg_start_resp.peer_public_key, node_2.keypair.public_key);
 
         let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]))?;
@@ -127,12 +104,8 @@ mod opaque_test {
             node_1.local_login_start("password2".to_string(), "Bob".to_string())?;
         assert_eq!(login_start_req.user_username, "Alice".to_string());
 
-        let login_start_resp = node_2.peer_login_start(
-            login_start_req.clone(),
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2, 3]),
-        )?;
+        let login_start_resp =
+            node_2.peer_login_start(login_start_req.clone(), i32_to_scalar(1), 2)?;
         assert_eq!(login_start_resp.peer_public_key, node_2.keypair.public_key);
 
         assert_eq!(
@@ -162,12 +135,8 @@ mod opaque_test {
             node_1.local_registration_start("password".to_string(), "Bob".to_string())?;
         reg_start_req = simulate_serde(reg_start_req);
 
-        let mut reg_start_resp = node_2.peer_registration_start(
-            reg_start_req,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2]),
-        )?;
+        let mut reg_start_resp =
+            node_2.peer_registration_start(reg_start_req, i32_to_scalar(1), 2)?;
         reg_start_resp = simulate_serde(reg_start_resp);
 
         let mut reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]))?;
@@ -179,8 +148,7 @@ mod opaque_test {
             node_1.local_login_start("password".to_string(), "Bob".to_string())?;
         login_start_req = simulate_serde(login_start_req);
 
-        let mut login_start_resp =
-            node_2.peer_login_start(login_start_req, i32_to_scalar(1), 2, HashSet::from([1, 2]))?;
+        let mut login_start_resp = node_2.peer_login_start(login_start_req, i32_to_scalar(1), 2)?;
         login_start_resp = simulate_serde(login_start_resp);
 
         let mut keypair = node_1.local_login_finish(Vec::from([login_start_resp]))?;
@@ -207,12 +175,7 @@ mod opaque_test {
         let reg_start_req =
             node_1.local_registration_start("password".to_string(), "Bob".to_string())?;
 
-        let reg_start_resp = node_2.peer_registration_start(
-            reg_start_req,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2]),
-        )?;
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req, i32_to_scalar(1), 2)?;
 
         node_1 = simulate_serde(node_1);
         let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]))?;
@@ -225,8 +188,7 @@ mod opaque_test {
             node_1.local_login_start("password".to_string(), "Bob".to_string())?;
 
         node_2 = simulate_serde(node_2);
-        let login_start_resp =
-            node_2.peer_login_start(login_start_req, i32_to_scalar(1), 2, HashSet::from([1, 2]))?;
+        let login_start_resp = node_2.peer_login_start(login_start_req, i32_to_scalar(1), 2)?;
 
         node_1 = simulate_serde(node_1);
         let keypair = node_1.local_login_finish(Vec::from([login_start_resp]))?;
@@ -244,12 +206,7 @@ mod opaque_test {
         let reg_start_req =
             node_1.local_registration_start("password".to_string(), "Bob".to_string())?;
 
-        let reg_start_resp = node_2.peer_registration_start(
-            reg_start_req,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2]),
-        )?;
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req, i32_to_scalar(1), 2)?;
 
         let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]))?;
 
@@ -261,12 +218,7 @@ mod opaque_test {
 
         assert_eq!(
             node_2
-                .peer_login_start(
-                    login_start_req.clone(),
-                    i32_to_scalar(1),
-                    3,
-                    HashSet::from([1, 2])
-                )
+                .peer_login_start(login_start_req.clone(), i32_to_scalar(1), 3,)
                 .unwrap_err(),
             P2POpaqueError::RegistrationError
         );
@@ -276,7 +228,7 @@ mod opaque_test {
         login_start_req_2.user_username = "David".to_string();
         assert_eq!(
             node_2
-                .peer_login_start(login_start_req, i32_to_scalar(1), 2, HashSet::from([1, 2]))
+                .peer_login_start(login_start_req, i32_to_scalar(1), 2,)
                 .unwrap_err(),
             P2POpaqueError::RegistrationError
         );
@@ -293,12 +245,7 @@ mod opaque_test {
         let reg_start_req =
             node_1.local_registration_start("password".to_string(), "Bob".to_string())?;
 
-        let reg_start_resp = node_2.peer_registration_start(
-            reg_start_req,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2]),
-        )?;
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req, i32_to_scalar(1), 2)?;
 
         assert_eq!(
             node_3
@@ -315,8 +262,7 @@ mod opaque_test {
         let login_start_req =
             node_1.local_login_start("password".to_string(), "Charlie".to_string())?;
 
-        let login_start_resp =
-            node_2.peer_login_start(login_start_req, i32_to_scalar(1), 2, HashSet::from([1, 2]))?;
+        let login_start_resp = node_2.peer_login_start(login_start_req, i32_to_scalar(1), 2)?;
 
         assert_eq!(
             node_3
@@ -336,22 +282,12 @@ mod opaque_test {
         let reg_start_req =
             node_1.local_registration_start("password".to_string(), "Bob".to_string())?;
 
-        let reg_start_resp = node_2.peer_registration_start(
-            reg_start_req,
-            i32_to_scalar(1),
-            2,
-            HashSet::from([1, 2]),
-        )?;
+        let reg_start_resp = node_2.peer_registration_start(reg_start_req, i32_to_scalar(1), 2)?;
 
         let mut node_3 = P2POpaqueNode::new("Charlie".to_string());
         let malicious_reg_start_req =
             node_3.local_registration_start("password".to_string(), "Bob".to_string())?;
-        node_2.peer_registration_start(
-            malicious_reg_start_req,
-            i32_to_scalar(1),
-            3,
-            HashSet::from([1, 2, 3]),
-        )?; // to initialize the OPRF client
+        node_2.peer_registration_start(malicious_reg_start_req, i32_to_scalar(1), 3)?; // to initialize the OPRF client
 
         // finish registration with node 1's response, forge their peer ID and public key
         let mut malicious_reg_finish_req =
@@ -397,7 +333,6 @@ mod opaque_test {
             ])
             .unwrap(),
             1,
-            HashSet::from([1, 2, 3]),
         )?;
         assert_eq!(
             reg_start_resp_node_2.peer_public_key,
@@ -414,7 +349,6 @@ mod opaque_test {
             ])
             .unwrap(),
             2,
-            HashSet::from([1, 2, 3]),
         )?;
         assert_eq!(
             reg_start_resp_node_3.peer_public_key,
@@ -431,7 +365,6 @@ mod opaque_test {
             ])
             .unwrap(),
             3,
-            HashSet::from([1, 2, 3]),
         )?;
         assert_eq!(
             reg_start_resp_node_4.peer_public_key,
@@ -468,7 +401,6 @@ mod opaque_test {
             ])
             .unwrap(),
             1,
-            HashSet::from([1, 2, 3]),
         )?;
         assert_eq!(
             login_start_resp_node_2.peer_public_key,
@@ -485,7 +417,6 @@ mod opaque_test {
             ])
             .unwrap(),
             2,
-            HashSet::from([1, 2, 3]),
         )?;
         assert_eq!(
             login_start_resp_node_3.peer_public_key,
@@ -502,7 +433,6 @@ mod opaque_test {
             ])
             .unwrap(),
             3,
-            HashSet::from([1, 2, 3]),
         )?;
         assert_eq!(
             login_start_resp_node_4.peer_public_key,

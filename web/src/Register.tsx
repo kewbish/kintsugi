@@ -17,6 +17,8 @@ function Register() {
     "bootstrap0",
     "bootstrap1",
     "bootstrap2",
+    "bootstrap3",
+    "bootstrap4",
   ]);
   const [threshold, setThreshold] = useState(3);
 
