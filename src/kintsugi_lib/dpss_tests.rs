@@ -6,7 +6,7 @@ mod dpss_test {
     use rand::rngs::OsRng;
     use sha3::Sha3_512;
 
-    use crate::{
+    use crate::kintsugi_lib::{
         dpss::DPSS,
         polynomial::{get_lagrange_coefficient, BivariatePolynomial, Polynomial},
         util::i32_to_scalar,

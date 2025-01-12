@@ -3,7 +3,7 @@ mod zkp_test {
     use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, Scalar};
     use rand::rngs::OsRng;
 
-    use crate::zkp::{DLPZKP, ZKP};
+    use crate::kintsugi_lib::zkp::{DLPZKP, ZKP};
 
     #[test]
     fn test_zkp_verify() {

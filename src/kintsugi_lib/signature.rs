@@ -1,4 +1,4 @@
-use crate::keypair::{Keypair, PublicKey};
+use crate::kintsugi_lib::keypair::{Keypair, PublicKey};
 use curve25519_dalek::constants;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;

@@ -14,10 +14,10 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    keypair::{Keypair, PrivateKey, PublicKey},
-    opaque::P2POpaqueError,
-    polynomial::Polynomial,
-    zkp::ZKP,
+    kintsugi_lib::error::KintsugiError,
+    kintsugi_lib::keypair::{Keypair, PrivateKey, PublicKey},
+    kintsugi_lib::polynomial::Polynomial,
+    kintsugi_lib::zkp::ZKP,
 };
 
 pub struct ACSS {}
@@ -48,7 +48,7 @@ impl ACSS {
         dealer_key: PrivateKey,
         peer_public_keys: HashMap<String, PublicKey>,
         peer_indexes: HashMap<String, i32>,
-    ) -> Result<(HashMap<String, ACSSDealerShare>, Polynomial, Polynomial), P2POpaqueError> {
+    ) -> Result<(HashMap<String, ACSSDealerShare>, Polynomial, Polynomial), KintsugiError> {
         let mut shares = HashMap::new();
         let phi = Polynomial::new_w_secret(degree, secret);
         let phi_hat = Polynomial::new(degree);
@@ -59,13 +59,13 @@ impl ACSS {
             let dealer_private_key_scalar = Scalar::from_bytes_mod_order(dealer_key);
             let peer_public_key_point = CompressedRistretto::from_slice(public_key);
             if let Err(e) = peer_public_key_point {
-                return Err(P2POpaqueError::SerializationError(
+                return Err(KintsugiError::SerializationError(
                     "Error deserializing public key ".to_string() + &e.to_string(),
                 ));
             }
             let peer_public_key_point = peer_public_key_point.unwrap().decompress();
             if let None = peer_public_key_point {
-                return Err(P2POpaqueError::SerializationError(
+                return Err(KintsugiError::SerializationError(
                     "Error deserializing public key".to_string(),
                 ));
             }
@@ -79,7 +79,7 @@ impl ACSS {
 
             let v_i = cipher.encrypt(nonce, phi.at(i).to_bytes().as_slice());
             if let Err(e) = v_i {
-                return Err(P2POpaqueError::CryptoError(
+                return Err(KintsugiError::CryptoError(
                     "Encryption failed".to_string() + &e.to_string(),
                 ));
             }
@@ -87,7 +87,7 @@ impl ACSS {
 
             let v_hat_i = cipher.encrypt(nonce, phi_hat.at(i).to_bytes().as_slice());
             if let Err(e) = v_hat_i {
-                return Err(P2POpaqueError::CryptoError(
+                return Err(KintsugiError::CryptoError(
                     "Encryption failed".to_string() + &e.to_string(),
                 ));
             }
@@ -123,9 +123,9 @@ impl ACSS {
         share: ACSSDealerShare,
         keypair: Keypair,
         dealer_key: PublicKey,
-    ) -> Result<ACSSNodeShare, P2POpaqueError> {
+    ) -> Result<ACSSNodeShare, KintsugiError> {
         if !share.proof.verify(h_point, share.c_i) {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "ZKP was not accepted".to_string(),
             ));
         }
@@ -133,13 +133,13 @@ impl ACSS {
         let private_key_scalar = Scalar::from_bytes_mod_order(keypair.private_key);
         let dealer_public_key_point = CompressedRistretto::from_slice(&dealer_key);
         if let Err(e) = dealer_public_key_point {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "Error deserializing public key ".to_string() + &e.to_string(),
             ));
         }
         let dealer_public_key_point = dealer_public_key_point.unwrap().decompress();
         if let None = dealer_public_key_point {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "Error decompressing public key".to_string(),
             ));
         }
@@ -150,14 +150,14 @@ impl ACSS {
         let nonce = Nonce::from_slice(&nonce_bytes);
         let s_i_d_bytes = cipher.decrypt(nonce, share.v_i.as_ref());
         if let Err(e) = s_i_d_bytes {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),
             ));
         }
         let s_i_d_bytes = s_i_d_bytes.unwrap();
         let s_i_d_bytes: Result<[u8; 32], _> = s_i_d_bytes.try_into();
         if let Err(_) = s_i_d_bytes {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "Deserialization failed: ".to_string(),
             ));
         }
@@ -166,14 +166,14 @@ impl ACSS {
 
         let s_hat_i_d_bytes = cipher.decrypt(nonce, share.v_hat_i.as_ref());
         if let Err(e) = s_hat_i_d_bytes {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),
             ));
         }
         let s_hat_i_d_bytes = s_hat_i_d_bytes.unwrap();
         let s_hat_i_d_bytes: Result<[u8; 32], _> = s_hat_i_d_bytes.try_into();
         if let Err(_) = s_hat_i_d_bytes {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "Deserialization failed: ".to_string(),
             ));
         }

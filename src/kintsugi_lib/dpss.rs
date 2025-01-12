@@ -3,8 +3,10 @@ use std::collections::{HashMap, HashSet};
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, RistrettoPoint, Scalar};
 
 use crate::{
-    opaque::P2POpaqueError,
-    polynomial::{get_lagrange_coefficient_w_target, BivariatePolynomial, Polynomial},
+    kintsugi_lib::error::KintsugiError,
+    kintsugi_lib::polynomial::{
+        get_lagrange_coefficient_w_target, BivariatePolynomial, Polynomial,
+    },
 };
 
 pub struct DPSS {}
@@ -28,13 +30,13 @@ impl DPSS {
         polynomials: HashMap<Scalar, Polynomial>,
         polynomials_hats: HashMap<Scalar, Polynomial>,
         commitments: HashMap<Scalar, RistrettoPoint>,
-    ) -> Result<(Scalar, Scalar, HashMap<Scalar, RistrettoPoint>), P2POpaqueError> {
+    ) -> Result<(Scalar, Scalar, HashMap<Scalar, RistrettoPoint>), KintsugiError> {
         let polynomials_keys: HashSet<Scalar> = polynomials.keys().copied().collect();
         let polynomials_hats_keys: HashSet<Scalar> = polynomials_hats.keys().copied().collect();
         let commitments_keys: HashSet<Scalar> = commitments.keys().copied().collect();
         if !(polynomials_keys == polynomials_hats_keys && polynomials_hats_keys == commitments_keys)
         {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Missing shares, blinding factors, or commitments for some nodes".to_string(),
             ));
         }
@@ -65,11 +67,11 @@ impl DPSS {
     pub fn reshare_w_evals(
         evaluations: HashMap<Scalar, Scalar>,
         evaluations_hats: HashMap<Scalar, Scalar>,
-    ) -> Result<(Scalar, Scalar), P2POpaqueError> {
+    ) -> Result<(Scalar, Scalar), KintsugiError> {
         let evals_keys: HashSet<Scalar> = evaluations.keys().copied().collect();
         let evals_hats_keys: HashSet<Scalar> = evaluations_hats.keys().copied().collect();
         if !(evals_keys == evals_hats_keys) {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Missing shares or blinding factors for some nodes".to_string(),
             ));
         }

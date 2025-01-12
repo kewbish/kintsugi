@@ -2,7 +2,7 @@ use curve25519_dalek::{RistrettoPoint, Scalar};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-use crate::opaque::P2POpaqueError;
+use crate::kintsugi_lib::error::KintsugiError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct OPRFClient {
@@ -19,9 +19,9 @@ impl OPRFClient {
             },
         );
     }
-    pub fn unblind(&self, point: RistrettoPoint) -> Result<RistrettoPoint, P2POpaqueError> {
+    pub fn unblind(&self, point: RistrettoPoint) -> Result<RistrettoPoint, KintsugiError> {
         if let None = self.current_blinding_scalar {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Blinding scalar not saved in OPRF client".to_string(),
             ));
         }

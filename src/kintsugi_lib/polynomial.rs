@@ -4,7 +4,7 @@ use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-use crate::opaque::P2POpaqueError;
+use crate::kintsugi_lib::error::KintsugiError;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Polynomial {
@@ -31,20 +31,20 @@ impl Polynomial {
         polynomial
     }
     #[allow(dead_code)]
-    pub fn to_bytes(self) -> Result<Vec<u8>, P2POpaqueError> {
+    pub fn to_bytes(self) -> Result<Vec<u8>, KintsugiError> {
         let string_res = serde_json::to_string(&self);
         if let Err(e) = string_res {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "JSON serialization of polynomial failed: ".to_string() + &e.to_string(),
             ));
         }
         Ok(string_res.unwrap().into_bytes())
     }
     #[allow(dead_code)]
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, P2POpaqueError> {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, KintsugiError> {
         let res: Result<Self, _> = serde_json::from_slice(&bytes);
         if let Err(e) = res {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "JSON deserialization of polynomial failed: ".to_string() + &e.to_string(),
             ));
         }

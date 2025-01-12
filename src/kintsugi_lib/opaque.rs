@@ -1,34 +1,20 @@
-use crate::keypair::{Keypair, PublicKey};
-use crate::oprf::{OPRFClient, OPRFServer};
-use crate::polynomial;
-use crate::signature::Signature;
-use crate::util::i32_to_scalar;
+use crate::kintsugi_lib::error::KintsugiError;
+use crate::kintsugi_lib::keypair::{Keypair, PublicKey};
+use crate::kintsugi_lib::oprf::{OPRFClient, OPRFServer};
+use crate::kintsugi_lib::polynomial;
+use crate::kintsugi_lib::signature::Signature;
+use crate::kintsugi_lib::util::i32_to_scalar;
 #[allow(unused_imports)]
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use curve25519_dalek::{RistrettoPoint, Scalar};
-use derive_more::Display;
 use rand::rngs::OsRng;
 use rand::RngCore;
 #[allow(unused_imports)]
 use sha3::{Digest, Sha3_256, Sha3_256Core, Sha3_512};
 use std::collections::{HashMap, HashSet};
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Display)]
-pub enum P2POpaqueError {
-    RegistrationError,
-    CryptoError(String),
-    SerializationError(String),
-    FileError(String),
-}
-
-impl std::error::Error for P2POpaqueError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct P2POpaqueNode {
@@ -65,7 +51,7 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
         node_username: String,
-    ) -> Result<RegStartRequest, P2POpaqueError> {
+    ) -> Result<RegStartRequest, KintsugiError> {
         let password_point = RistrettoPoint::hash_from_bytes::<Sha3_512>(password.as_bytes());
         let (password_blind_result, state) = OPRFClient::blind(password_point);
         self.peer_oprf_clients.insert(node_username, state);
@@ -91,7 +77,7 @@ impl P2POpaqueNode {
         peer_req: RegStartRequest,
         s_i_d: Scalar,
         index: i32,
-    ) -> Result<RegStartResponse, P2POpaqueError> {
+    ) -> Result<RegStartResponse, KintsugiError> {
         let opaque_keypair = Keypair::new();
         self.peer_opaque_keys
             .insert(peer_req.user_username.clone(), opaque_keypair.clone());
@@ -99,7 +85,7 @@ impl P2POpaqueNode {
             .peer_attempted_public_keys
             .contains_key(&peer_req.user_username)
         {
-            return Err(P2POpaqueError::RegistrationError);
+            return Err(KintsugiError::RegistrationError);
         }
         self.peer_attempted_public_keys
             .insert(peer_req.user_username, peer_req.peer_public_key);
@@ -139,21 +125,21 @@ impl P2POpaqueNode {
     pub fn local_registration_finish(
         &mut self,
         peer_resps: Vec<RegStartResponse>,
-    ) -> Result<Vec<RegFinishRequest>, P2POpaqueError> {
+    ) -> Result<Vec<RegFinishRequest>, KintsugiError> {
         let mut combined_rwds = Vec::new();
         let other_indices: HashSet<Scalar> =
             peer_resps.iter().map(|v| i32_to_scalar(v.index)).collect();
         for peer_resp in peer_resps.iter() {
             let oprf_client = self.peer_oprf_clients.get(&peer_resp.node_username);
             if let None = oprf_client {
-                return Err(P2POpaqueError::CryptoError(
+                return Err(KintsugiError::CryptoError(
                     "OPRF client not initialized".to_string(),
                 ));
             }
             let oprf_client = oprf_client.unwrap();
             let unblinded_rwd = oprf_client.unblind(peer_resp.rwd);
             if let Err(e) = unblinded_rwd {
-                return Err(P2POpaqueError::CryptoError(
+                return Err(KintsugiError::CryptoError(
                     "Unblinding failed: ".to_string() + &e.to_string(),
                 ));
             }
@@ -179,13 +165,13 @@ impl P2POpaqueNode {
         };
         let plaintext = serde_json::to_string(&envelope);
         if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
             ));
         }
         let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
         if let Err(e) = ciphertext {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Encryption of envelope failed: ".to_string() + &e.to_string(),
             ));
         }
@@ -213,7 +199,7 @@ impl P2POpaqueNode {
     pub fn peer_registration_finish(
         &mut self,
         peer_req: RegFinishRequest,
-    ) -> Result<(), P2POpaqueError> {
+    ) -> Result<(), KintsugiError> {
         let peer_public_key = self.peer_attempted_public_keys.get(&peer_req.user_username);
         if let None = peer_public_key {
             // don't leak that a registration attempt was not started
@@ -223,7 +209,7 @@ impl P2POpaqueNode {
             &peer_req.encrypted_envelope,
             peer_public_key.unwrap().clone(),
         ) {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Could not verify signature of registration request".to_string(),
             ));
         }
@@ -250,7 +236,7 @@ impl P2POpaqueNode {
         &mut self,
         password: String,
         node_username: String,
-    ) -> Result<LoginStartRequest, P2POpaqueError> {
+    ) -> Result<LoginStartRequest, KintsugiError> {
         let password_point = RistrettoPoint::hash_from_bytes::<Sha3_512>(password.as_bytes());
         let (password_blind_result, state) = OPRFClient::blind(password_point);
         self.peer_oprf_clients.insert(node_username, state);
@@ -276,14 +262,14 @@ impl P2POpaqueNode {
         peer_req: LoginStartRequest,
         s_i_d: Scalar,
         index: i32,
-    ) -> Result<LoginStartResponse, P2POpaqueError> {
+    ) -> Result<LoginStartResponse, KintsugiError> {
         let local_opaque_keypair = self.peer_opaque_keys.get(&peer_req.user_username);
         if let None = local_opaque_keypair {
-            return Err(P2POpaqueError::RegistrationError);
+            return Err(KintsugiError::RegistrationError);
         }
         let envelope = self.envelopes.get(&peer_req.user_username);
         if let None = envelope {
-            return Err(P2POpaqueError::RegistrationError);
+            return Err(KintsugiError::RegistrationError);
         }
         let password_blind_eval = OPRFServer::blind_evaluate(peer_req.blinded_pwd, s_i_d);
         Ok(LoginStartResponse {
@@ -300,21 +286,21 @@ impl P2POpaqueNode {
     pub fn local_login_finish(
         &mut self,
         peer_resps: Vec<LoginStartResponse>,
-    ) -> Result<Keypair, P2POpaqueError> {
+    ) -> Result<Keypair, KintsugiError> {
         let mut combined_rwds = Vec::new();
         let other_indices: HashSet<Scalar> =
             peer_resps.iter().map(|v| i32_to_scalar(v.index)).collect();
         for peer_resp in peer_resps.iter() {
             let oprf_client = self.peer_oprf_clients.get(&peer_resp.node_username);
             if let None = oprf_client {
-                return Err(P2POpaqueError::CryptoError(
+                return Err(KintsugiError::CryptoError(
                     "OPRF client not initialized".to_string(),
                 ));
             }
             let oprf_client = oprf_client.unwrap();
             let unblinded_rwd = oprf_client.unblind(peer_resp.rwd);
             if let Err(e) = unblinded_rwd {
-                return Err(P2POpaqueError::CryptoError(
+                return Err(KintsugiError::CryptoError(
                     "Unblinding failed: ".to_string() + &e.to_string(),
                 ));
             }
@@ -336,14 +322,14 @@ impl P2POpaqueNode {
         let plaintext_bytes =
             cipher.decrypt(nonce, peer_resps[0].envelope.encrypted_envelope.as_ref());
         if let Err(e) = plaintext_bytes {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),
             ));
         }
         let plaintext_bytes = plaintext_bytes.unwrap();
         let plaintext: Result<Envelope, _> = serde_json::from_slice(&plaintext_bytes);
         if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "Deserialization failed: ".to_string() + &e.to_string(),
             ));
         }

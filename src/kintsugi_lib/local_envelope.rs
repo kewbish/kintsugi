@@ -1,5 +1,5 @@
-use crate::keypair::Keypair;
-use crate::opaque::P2POpaqueError;
+use crate::kintsugi_lib::error::KintsugiError;
+use crate::kintsugi_lib::keypair::Keypair;
 
 #[allow(unused_imports)]
 use chacha20poly1305::{
@@ -21,7 +21,7 @@ impl LocalEnvelope {
     pub fn encrypt_w_password(
         self,
         password: String,
-    ) -> Result<LocalEncryptedEnvelope, P2POpaqueError> {
+    ) -> Result<LocalEncryptedEnvelope, KintsugiError> {
         let mut hasher = Sha3_256::new();
         hasher.update(password.as_bytes());
         let key = hasher.finalize();
@@ -32,13 +32,13 @@ impl LocalEnvelope {
 
         let plaintext = serde_json::to_string(&self);
         if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "JSON serialization of envelope failed: ".to_string() + &e.to_string(),
             ));
         }
         let ciphertext = cipher.encrypt(nonce, plaintext.unwrap().as_bytes());
         if let Err(e) = ciphertext {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Encryption of envelope failed: ".to_string() + &e.to_string(),
             ));
         }
@@ -58,7 +58,7 @@ pub struct LocalEncryptedEnvelope {
 }
 
 impl LocalEncryptedEnvelope {
-    pub fn decrypt_w_password(self, password: String) -> Result<LocalEnvelope, P2POpaqueError> {
+    pub fn decrypt_w_password(self, password: String) -> Result<LocalEnvelope, KintsugiError> {
         let mut hasher = Sha3_256::new();
         hasher.update(password.as_bytes());
         let key = hasher.finalize();
@@ -66,14 +66,14 @@ impl LocalEncryptedEnvelope {
         let nonce = Nonce::from_slice(&self.nonce);
         let plaintext_bytes = cipher.decrypt(nonce, self.encrypted_envelope.as_ref());
         if let Err(e) = plaintext_bytes {
-            return Err(P2POpaqueError::CryptoError(
+            return Err(KintsugiError::CryptoError(
                 "Decryption failed: ".to_string() + &e.to_string(),
             ));
         }
         let plaintext_bytes = plaintext_bytes.unwrap();
         let plaintext: Result<LocalEnvelope, _> = serde_json::from_slice(&plaintext_bytes);
         if let Err(e) = plaintext {
-            return Err(P2POpaqueError::SerializationError(
+            return Err(KintsugiError::SerializationError(
                 "Deserialization failed: ".to_string() + &e.to_string(),
             ));
         }

@@ -3,12 +3,12 @@ mod opaque_test {
     use curve25519_dalek::Scalar;
 
     use crate::{
-        opaque::{P2POpaqueError, P2POpaqueNode},
-        util::i32_to_scalar,
+        kintsugi_lib::error::KintsugiError, kintsugi_lib::opaque::P2POpaqueNode,
+        kintsugi_lib::util::i32_to_scalar,
     };
 
     #[test]
-    fn test_happy_path() -> Result<(), P2POpaqueError> {
+    fn test_happy_path() -> Result<(), KintsugiError> {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
         let mut node_3 = P2POpaqueNode::new("Charlie".to_string());
@@ -77,7 +77,7 @@ mod opaque_test {
     }
 
     #[test]
-    fn test_wrong_password() -> Result<(), P2POpaqueError> {
+    fn test_wrong_password() -> Result<(), KintsugiError> {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
 
@@ -112,14 +112,14 @@ mod opaque_test {
             node_1
                 .local_login_finish(Vec::from([login_start_resp]))
                 .unwrap_err(),
-            P2POpaqueError::CryptoError("Decryption failed: aead::Error".to_string())
+            KintsugiError::CryptoError("Decryption failed: aead::Error".to_string())
         );
 
         Ok(())
     }
 
     #[test]
-    fn test_serde_req_resps() -> Result<(), P2POpaqueError> {
+    fn test_serde_req_resps() -> Result<(), KintsugiError> {
         fn simulate_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(message: T) -> T {
             let serialized =
                 serde_json::to_string(&message).expect("JSON serialization of message failed");
@@ -160,7 +160,7 @@ mod opaque_test {
     }
 
     #[test]
-    fn test_serde_node() -> Result<(), P2POpaqueError> {
+    fn test_serde_node() -> Result<(), KintsugiError> {
         fn simulate_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(node: T) -> T {
             let serialized =
                 serde_json::to_string(&node).expect("JSON serialization of message failed");
@@ -199,7 +199,7 @@ mod opaque_test {
     }
 
     #[test]
-    fn test_nonexistent_envelope() -> Result<(), P2POpaqueError> {
+    fn test_nonexistent_envelope() -> Result<(), KintsugiError> {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
 
@@ -220,7 +220,7 @@ mod opaque_test {
             node_2
                 .peer_login_start(login_start_req.clone(), i32_to_scalar(1), 3,)
                 .unwrap_err(),
-            P2POpaqueError::RegistrationError
+            KintsugiError::RegistrationError
         );
 
         let mut login_start_req_2 =
@@ -230,14 +230,14 @@ mod opaque_test {
             node_2
                 .peer_login_start(login_start_req, i32_to_scalar(1), 2,)
                 .unwrap_err(),
-            P2POpaqueError::RegistrationError
+            KintsugiError::RegistrationError
         );
 
         Ok(())
     }
 
     #[test]
-    fn test_nonexistent_peer_finish() -> Result<(), P2POpaqueError> {
+    fn test_nonexistent_peer_finish() -> Result<(), KintsugiError> {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
         let mut node_3 = P2POpaqueNode::new("Charlie".to_string());
@@ -252,7 +252,7 @@ mod opaque_test {
                 .clone()
                 .local_registration_finish(Vec::from([reg_start_resp.clone()]))
                 .unwrap_err(),
-            P2POpaqueError::CryptoError("OPRF client not initialized".to_string())
+            KintsugiError::CryptoError("OPRF client not initialized".to_string())
         );
 
         let reg_finish_req = node_1.local_registration_finish(Vec::from([reg_start_resp]))?;
@@ -268,14 +268,14 @@ mod opaque_test {
             node_3
                 .local_login_finish(Vec::from([login_start_resp]))
                 .unwrap_err(),
-            P2POpaqueError::CryptoError("OPRF client not initialized".to_string())
+            KintsugiError::CryptoError("OPRF client not initialized".to_string())
         );
 
         Ok(())
     }
 
     #[test]
-    fn test_malicious_peer_reg_finish() -> Result<(), P2POpaqueError> {
+    fn test_malicious_peer_reg_finish() -> Result<(), KintsugiError> {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
 
@@ -305,7 +305,7 @@ mod opaque_test {
             node_2
                 .peer_registration_finish(malicious_reg_finish_req.get(0).unwrap().clone())
                 .unwrap_err(),
-            P2POpaqueError::CryptoError(
+            KintsugiError::CryptoError(
                 "Could not verify signature of registration request".to_string()
             )
         );
@@ -314,7 +314,7 @@ mod opaque_test {
     }
 
     #[test]
-    fn test_opaque_with_refresh() -> Result<(), P2POpaqueError> {
+    fn test_opaque_with_refresh() -> Result<(), KintsugiError> {
         let mut node_1 = P2POpaqueNode::new("Alice".to_string());
         let mut node_2 = P2POpaqueNode::new("Bob".to_string());
         let mut node_3 = P2POpaqueNode::new("Charlie".to_string());

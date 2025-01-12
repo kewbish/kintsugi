@@ -11,12 +11,13 @@ Key recovery is the process of regaining access to an account or end-to-end encr
 
 ---
 
-This Kintsugi implementation is accompagnied by a demo Tauri app using React as a frontend and libp2p in the backend. This demo app is a WIP.
+This Kintsugi implementation is accompanied by a demo Tauri app using React as a frontend and libp2p in the backend. This demo app is intended as a research preview and is not production-ready.
 
 - See [`web/`](./web) for the React frontend
 - See [`src/`](./src) for the Rust backend
-  - See [`src/main.rs`](./src/main.rs) for the network communication
-  - See [`src/opaque.rs`](./src/opaque.rs) for the OPRF exchange
-  - Each module's associated tests can be found in the [`src/`](./src) directory and can be run via `cargo test`
+  - See [`src/main.rs`](./src/main.rs) for the network communication and Tauri UI commands
+  - See [`src/kintsugi_lib/`](./src/kintsugi_lib/) for the library implementation
+  - See [`src/kintsugi_lib/opaque.rs`](./src/kintsugi_lib/opaque.rs) for the OPRF exchange
+  - Each module's associated tests can be found in the [`src/kintsugi_lib/`](./src/kintsugi_lib/) directory and can be run via `cargo test`
 
 To run the app, start the React Vite server with `cd web/ && npm run dev`. Then, run `cargo run`, which will open the Tauri app window.

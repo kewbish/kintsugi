@@ -4,7 +4,7 @@ mod acss_test {
     use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, Scalar};
     use rand::rngs::OsRng;
 
-    use crate::{
+    use crate::kintsugi_lib::{
         acss::ACSS, keypair::Keypair, polynomial::BivariatePolynomial, util::i32_to_scalar,
     };
 

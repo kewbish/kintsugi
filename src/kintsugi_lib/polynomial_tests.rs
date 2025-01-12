@@ -5,7 +5,7 @@ mod polynomial_test {
     use curve25519_dalek::Scalar;
     use rand::rngs::OsRng;
 
-    use crate::polynomial::{
+    use crate::kintsugi_lib::polynomial::{
         get_lagrange_coefficient, get_lagrange_coefficient_w_target, BivariatePolynomial,
         Polynomial,
     };

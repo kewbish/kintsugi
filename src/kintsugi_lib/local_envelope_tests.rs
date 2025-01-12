@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod local_encdec_test {
-    use crate::{keypair::Keypair, local_envelope::LocalEnvelope};
+    use crate::kintsugi_lib::{keypair::Keypair, local_envelope::LocalEnvelope};
 
     #[test]
     fn test_enc_dec_local_envelope() {
