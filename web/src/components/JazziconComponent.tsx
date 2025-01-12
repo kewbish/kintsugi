@@ -1,4 +1,4 @@
-import { DOMElement, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import jazzicon from "@metamask/jazzicon";
 
 // variant of DJB2

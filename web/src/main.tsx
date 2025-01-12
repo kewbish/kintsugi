@@ -1,4 +1,3 @@
-import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import Home from "./Home";
@@ -30,16 +29,14 @@ const router = createBrowserRouter([
   },
   {
     path: "/recovery",
-    element: (
-      // TODO - readd auth
-      <Recovery />
-    ),
+    element: <Recovery />,
   },
   {
     path: "/contacts",
     element: (
-      // TODO - readd auth
-      <ContactSelection />
+      <RequiresAuth>
+        <ContactSelection />
+      </RequiresAuth>
     ),
   },
 ]);

@@ -2,9 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useContext, useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import Skeleton from "react-loading-skeleton";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useDebounce } from "use-debounce";
-import CopyableCodeblock from "./components/CopyableCodeblock";
 import User from "./components/User";
 import { AuthContext } from "./components/AuthContext";
 import { listen } from "@tauri-apps/api/event";
@@ -64,7 +63,7 @@ const Recovery = () => {
   const { setIsLoggedIn } = useContext(AuthContext);
 
   const startRecovery = async () => {
-    let recoveryAddresses = new Map();
+    const recoveryAddresses = new Map();
     for (const i in peers) {
       if (selectedPeers[i]) {
         recoveryAddresses.set(peers[i][0], peers[i][1]);
@@ -114,8 +113,7 @@ const Recovery = () => {
       style={{
         display: "flex",
         flexDirection: "column",
-        justifyContent: "center",
-        padding: "5em 0",
+        marginTop: "calc(10em - 24px)",
       }}
     >
       <Link to="/">&lt; back</Link>
@@ -139,33 +137,35 @@ const Recovery = () => {
           <hr />
           {debouncedUsername.length != 0 ? (
             !loading ? (
-              <>
-                {peers.map((peer, i) => (
-                  <div
-                    style={{
-                      border: "2px solid var(--main)",
-                      borderRadius: "1em",
-                      padding: "1em",
-                      marginBottom: "0.5em",
-                      cursor: "pointer",
-                      backgroundColor: selectedPeers[i]
-                        ? "var(--main-light)"
-                        : "auto",
-                    }}
-                    key={peer[0] + selectedPeers[i]}
-                    onClick={() => {
-                      setSelectedPeers((currentSelected) => {
-                        let newSelected = currentSelected.slice();
-                        newSelected[i] = !currentSelected[i];
-                        return newSelected;
-                      });
-                    }}
-                  >
-                    <User user={peer[0]} />
-                  </div>
-                ))}
-                <p>Select at least {threshold} recovery nodes to recover.</p>
-              </>
+              peers.length ? (
+                <>
+                  {peers.map((peer, i) => (
+                    <div
+                      style={{
+                        border: "2px solid var(--main)",
+                        borderRadius: "1em",
+                        padding: "1em",
+                        marginBottom: "0.5em",
+                        cursor: "pointer",
+                        backgroundColor: selectedPeers[i]
+                          ? "var(--main-light)"
+                          : "auto",
+                      }}
+                      key={peer[0] + selectedPeers[i]}
+                      onClick={() => {
+                        setSelectedPeers((currentSelected) => {
+                          const newSelected = currentSelected.slice();
+                          newSelected[i] = !currentSelected[i];
+                          return newSelected;
+                        });
+                      }}
+                    >
+                      <User user={peer[0]} />
+                    </div>
+                  ))}
+                  <p>Select at least {threshold} recovery nodes to recover.</p>
+                </>
+              ) : null
             ) : (
               <Skeleton
                 height={136}

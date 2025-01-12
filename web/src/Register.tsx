@@ -1,10 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useState } from "react";
 import toast from "react-hot-toast";
 import { Link, useNavigate } from "react-router-dom";
-import { useDebounce } from "use-debounce";
 import { AuthContext } from "./components/AuthContext";
-import CopyableCodeblock from "./components/CopyableCodeblock";
 import JazziconComponent from "./components/JazziconComponent";
 
 function Register() {
@@ -23,7 +21,7 @@ function Register() {
   const [threshold, setThreshold] = useState(3);
 
   const register = () => {
-    let recoveryAddresses = new Map();
+    const recoveryAddresses = new Map();
     for (const [i, address] of recoveryNodes.entries()) {
       recoveryAddresses.set(address, i + 1);
     }
@@ -55,9 +53,7 @@ function Register() {
       style={{
         display: "flex",
         flexDirection: "column",
-        justifyContent: "center",
-        height: "100%",
-        marginTop: "-3em",
+        marginTop: "10em",
       }}
     >
       <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>
@@ -104,7 +100,7 @@ function Register() {
         </>
       ) : null}
       {stepNum === 1 ? (
-        <div>
+        <div style={{ marginBottom: "10em" }}>
           <a style={{ cursor: "pointer" }} onClick={() => setStepNum(0)}>
             &lt; back
           </a>
@@ -143,7 +139,7 @@ function Register() {
                       value={recoveryNodes[i]}
                       onChange={(e) =>
                         setRecoveryNodes((nodes) => {
-                          let newNodes = [...nodes];
+                          const newNodes = [...nodes];
                           newNodes[i] = e.target.value;
                           return newNodes;
                         })

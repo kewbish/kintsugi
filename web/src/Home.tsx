@@ -29,9 +29,7 @@ function Home() {
       style={{
         display: "flex",
         flexDirection: "column",
-        justifyContent: "center",
-        height: "100%",
-        marginTop: "-10em",
+        marginTop: "10em",
       }}
     >
       <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>

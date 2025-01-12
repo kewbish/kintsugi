@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useState } from "react";
 import toast from "react-hot-toast";
 import { Link, useNavigate } from "react-router-dom";
 import { AuthContext } from "./components/AuthContext";
@@ -12,7 +12,7 @@ function Login() {
 
   const login = () => {
     invoke("local_login", { username, password })
-      .then((resp) => {
+      .then(() => {
         setIsLoggedIn(true);
         toast.success("Successfully logged in!");
         navigate("/");
@@ -32,9 +32,7 @@ function Login() {
       style={{
         display: "flex",
         flexDirection: "column",
-        justifyContent: "center",
-        height: "100%",
-        marginTop: "-10em",
+        marginTop: "10em",
       }}
     >
       <h1 style={{ textAlign: "center" }}>Welcome to Kintsugi!</h1>

@@ -26,7 +26,7 @@ const ContactSelection = () => {
   }, []);
 
   const startRefresh = (peers: string[], threshold: number) => {
-    let newRecoveryAddresses = new Map();
+    const newRecoveryAddresses = new Map();
     for (const [i, address] of peers.entries()) {
       newRecoveryAddresses.set(address, i + 1);
     }
@@ -45,7 +45,7 @@ const ContactSelection = () => {
 
   useEffect(() => {
     const registerListener = async () => {
-      const unlisten = await listen<TauriRefreshFinished>("refresh", (_) => {
+      const unlisten = await listen<TauriRefreshFinished>("refresh", () => {
         toast.success("Updated recovery configuration!");
       });
       return unlisten;
@@ -62,9 +62,8 @@ const ContactSelection = () => {
       style={{
         display: "flex",
         flexDirection: "column",
-        justifyContent: "center",
-        height: "100%",
-        marginTop: "-5em",
+        marginTop: "calc(10em - 24px)",
+        marginBottom: "10em",
       }}
     >
       <Link to="/">&lt; back</Link>
@@ -79,7 +78,7 @@ const ContactSelection = () => {
                   <button
                     onClick={() => {
                       setPeers((currentPeers) => {
-                        let newPeers = currentPeers.filter(
+                        const newPeers = currentPeers.filter(
                           (_, index) => index != i
                         );
                         startRefresh(newPeers, threshold);
@@ -114,7 +113,7 @@ const ContactSelection = () => {
           style={{ marginRight: 0 }}
           onClick={() => {
             setPeers((currentPeers) => {
-              let newPeers = [...currentPeers, currentInput];
+              const newPeers = [...currentPeers, currentInput];
               startRefresh(newPeers, threshold);
               return newPeers;
             });
