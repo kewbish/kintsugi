@@ -13,6 +13,8 @@ Key recovery is the process of regaining access to an account or end-to-end encr
 
 This Kintsugi implementation is accompanied by a demo Tauri app using React as a frontend and libp2p in the backend. This demo app is intended as a research preview and is not production-ready.
 
+https://github.com/user-attachments/assets/ca224ea2-0998-4d07-b343-957f90a9cada
+
 - See [`web/`](./web) for the React frontend.
 - See [`src/`](./src) for the Rust backend.
   - See [`src/main.rs`](./src/main.rs) for the libp2p network communication and Tauri app. The other modules in [`src/`](./src/) contain the various types and handlers required.
