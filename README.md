@@ -5,6 +5,8 @@ Built in Rust, with Tauri, React, and libp2p.
 Released under the [MIT License](./LICENSE).  
 Written by [Emilie Ma](https://kewbi.sh).
 
+Full paper available [on arXiv](https://arxiv.org/abs/2507.21122).
+
 ---
 
 Key recovery is the process of regaining access to an account or end-to-end encrypted data in the case of device loss but not password loss. Existing E2EE key recovery methods, such as those deployed by Signal and WhatsApp, centralize trust by relying on servers administered by a single provider. This can be problematic for applications requiring metadata privacy or wanting to avoid a single party controlling user identities, for example. We propose Kintsugi, a decentralized recovery protocol that distributes trust over multiple recovery nodes, which could be servers run by independent parties, or end users in a peer-to-peer setting. To recover a user's keys, a threshold $t$ of recovery nodes must assist the user in decrypting a shared backup. Kintsugi is password-authenticated and protects against offline brute-force password guessing without requiring any specialized secure hardware. Kintsugi can tolerate the failure of up to a threshold $t$ of honest-but-curious colluding recovery nodes, as well as $n - t - 1$ offline nodes, and operates safely in an asynchronous network model where messages can be arbitrarily delayed.
